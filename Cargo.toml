@@ -1,0 +1,24 @@
+[package]
+name = "proxpulse-judge"
+version = "0.2.0"
+edition = "2021"
+description = "Self-hosted proxy-check backend (Rust/axum)"
+
+[[bin]]
+name = "proxpulse-judge"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+maxminddb = "0.24"
+moka = { version = "0.12", features = ["sync"] }
+dns-lookup = "2"
+sha2 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tower = { version = "0.4", features = ["util"] }

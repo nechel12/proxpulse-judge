@@ -1,25 +1,28 @@
-FROM python:3.12-slim
+# Rust multi-stage: static-ish glibc binary, tiny runtime
+FROM rust:bookworm AS build
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+# prefetch deps for layer caching
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
+    cargo build --release && rm -rf src target/release/.fingerprint/proxpulse-judge* target/release/proxpulse-judge*
+COPY src ./src
+RUN cargo build --release && strip target/release/proxpulse-judge
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    GEO_DIR=/app/geo \
-    TRUST_PROXY=1
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY app ./app
+FROM debian:bookworm-slim
 RUN useradd -m -u 10001 judge \
     && mkdir -p /app/geo \
     && chown -R judge:judge /app
+COPY --from=build /build/target/release/proxpulse-judge /app/proxpulse-judge
 USER judge
+
+ENV GEO_DIR=/app/geo \
+    TRUST_PROXY=1 \
+    RUST_LOG=info
 
 EXPOSE 8000
 VOLUME ["/app/geo"]
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"
+  CMD ["/app/proxpulse-judge", "--healthcheck"]
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --loop uvloop --http httptools --workers ${WORKERS:-1}"]
+ENTRYPOINT ["/app/proxpulse-judge"]
