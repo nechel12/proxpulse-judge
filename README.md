@@ -25,6 +25,35 @@ check.lmtunnel.com {
 }
 ```
 
+## Вариант Б — Cloudflare Tunnel (без Caddy и открытых портов)
+
+```sh
+cloudflared tunnel --url http://127.0.0.1:8000
+```
+
+или именованный туннель с DNS на `check.lmtunnel.com` и ingress:
+
+```yaml
+tunnel: <id>
+credentials-file: /root/.cloudflared/<id>.json
+ingress:
+  - hostname: check.lmtunnel.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404
+```
+
+Ничего менять в judge не надо: `TRUST_CF=1` по умолчанию, сервис берёт
+реальный IP из `CF-Connecting-IP` (его ставит сам Cloudflare, приоритет
+выше `X-Forwarded-For`), а все `cf-*`/`cdn-loop` заголовки исключены из
+детекта анонимности — иначе прямая проверка через туннель давала бы
+ложный `transparent`. Проверка:
+
+```sh
+MYIP=$(curl -s https://api.ipify.org)
+curl -s "https://check.lmtunnel.com/judge?direct_ip=$MYIP" | head -c 300; echo
+# ждём "anonymity":"elite"
+```
+
 ## Эндпоинты
 
 | Метод | Путь | Назначение |
@@ -78,6 +107,7 @@ check.lmtunnel.com {
 | `PORT` | `8000` | порт HTTP |
 | `GEO_DIR` | `/app/geo` | каталог `.mmdb` |
 | `TRUST_PROXY` | `1` | `1` — за Caddy (IP из конца `X-Forwarded-For`), `0` — напрямую (IP из сокета) |
+| `TRUST_CF` | `1` | `1` — верить `CF-Connecting-IP` (Cloudflare Tunnel), `0` — игнорировать |
 | `RDNS_TIMEOUT` | `1.5` | таймаут reverse-DNS для `?rdns=1`, сек |
 | `RUST_LOG` | `info` | уровень логов |
 
@@ -99,7 +129,7 @@ check.lmtunnel.com {
 ## Разработка
 
 ```sh
-cargo test        # 21 тест: логика, geo-парсинг, API
+cargo test        # 26 тестов: логика, geo-парсинг, API (+CF-туннель)
 cargo run         # PORT=8000 GEO_DIR=./geo TRUST_PROXY=0
 ```
 

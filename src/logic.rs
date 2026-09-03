@@ -40,9 +40,23 @@ pub fn split_xff(value: Option<&str>) -> Vec<String> {
 
 /// Resolve the real client IP (= proxy exit IP when checked via proxy).
 ///
-/// Caddy appends the client address to the END of X-Forwarded-For,
-/// so with trust_proxy the last entry is authoritative.
-pub fn client_ip(xff: Option<&str>, socket_ip: &str, trust_proxy: bool) -> String {
+/// Priority: `CF-Connecting-IP` (set by Cloudflare edge, single IP,
+/// only when trust_cf) → last X-Forwarded-For entry (appended by our
+/// own reverse proxy, only when trust_proxy) → socket address.
+pub fn client_ip(
+    cf_ip: Option<&str>,
+    xff: Option<&str>,
+    socket_ip: &str,
+    trust_proxy: bool,
+    trust_cf: bool,
+) -> String {
+    if trust_cf {
+        if let Some(cf) = cf_ip.map(str::trim) {
+            if !cf.is_empty() && cf.parse::<std::net::IpAddr>().is_ok() {
+                return cf.to_string();
+            }
+        }
+    }
     if trust_proxy {
         let chain = split_xff(xff);
         if let Some(last) = chain.last() {
@@ -64,9 +78,16 @@ pub fn forwarded_chain(xff: Option<&str>, client: &str, trust_proxy: bool) -> Ve
     chain
 }
 
+fn is_infra(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    // Cloudflare edge headers: CF-Connecting-IP always equals the exit IP
+    // by construction, so it must never count as a leak or a telltale.
+    INFRA_HEADERS.contains(&n.as_str()) || n.starts_with("cf-") || n == "cdn-loop"
+}
+
 fn is_telltale(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    if INFRA_HEADERS.contains(&n.as_str()) {
+    if is_infra(&n) {
         return false;
     }
     matches!(
@@ -100,7 +121,7 @@ pub fn anonymity_level(headers: &HashMap<String, String>, direct_ip: Option<&str
             }
             if headers
                 .iter()
-                .any(|(k, v)| k != "x-forwarded-for" && v.contains(d))
+                .any(|(k, v)| k != "x-forwarded-for" && !is_infra(k) && v.contains(d))
             {
                 return "transparent";
             }
@@ -281,12 +302,31 @@ mod tests {
 
     #[test]
     fn client_ip_resolution() {
-        assert_eq!(client_ip(None, "9.9.9.9", false), "9.9.9.9");
-        assert_eq!(client_ip(None, "9.9.9.9", true), "9.9.9.9");
+        assert_eq!(client_ip(None, None, "9.9.9.9", false, true), "9.9.9.9");
+        assert_eq!(client_ip(None, None, "9.9.9.9", true, true), "9.9.9.9");
         // proxy forwarded 1.2.3.4, Caddy appended exit 5.6.7.8
         assert_eq!(
-            client_ip(Some("1.2.3.4, 5.6.7.8"), "10.0.0.1", true),
+            client_ip(None, Some("1.2.3.4, 5.6.7.8"), "10.0.0.1", true, true),
             "5.6.7.8"
+        );
+    }
+
+    #[test]
+    fn client_ip_prefers_cf_header() {
+        // Cloudflare edge: real exit in CF-Connecting-IP, socket is the tunnel
+        assert_eq!(
+            client_ip(Some("5.6.7.8"), Some("9.9.9.9, 5.6.7.8"), "172.21.0.1", true, true),
+            "5.6.7.8"
+        );
+        // garbage CF value is ignored, XFF fallback still works
+        assert_eq!(
+            client_ip(Some("not-an-ip"), Some("9.9.9.9, 5.6.7.8"), "172.21.0.1", true, true),
+            "5.6.7.8"
+        );
+        // trust_cf off → CF header ignored
+        assert_eq!(
+            client_ip(Some("5.6.7.8"), None, "172.21.0.1", false, false),
+            "172.21.0.1"
         );
     }
 
@@ -339,6 +379,30 @@ mod tests {
             ("x-forwarded-host", "check.x"),
         ]);
         assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "elite");
+    }
+
+    #[test]
+    fn cf_direct_check_is_elite_not_transparent() {
+        // direct check through CF tunnel: CF-Connecting-IP always equals
+        // the exit IP by construction — must not count as a leak
+        let h = map(&[
+            ("cf-connecting-ip", "1.1.1.1"),
+            ("cf-ray", "abc123"),
+            ("cf-ipcountry", "DE"),
+            ("cdn-loop", "cloudflare"),
+            ("x-forwarded-for", ""),
+        ]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "elite");
+    }
+
+    #[test]
+    fn cf_transparent_still_detected() {
+        // proxy leaked 1.1.1.1 into XFF, CF appended exit 5.6.7.8
+        let h = map(&[
+            ("cf-connecting-ip", "5.6.7.8"),
+            ("x-forwarded-for", "1.1.1.1"),
+        ]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "transparent");
     }
 
     #[test]

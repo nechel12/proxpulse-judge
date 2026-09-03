@@ -27,13 +27,14 @@ use std::{
 use geo::{GeoInfo, GeoPool};
 use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
 
-const VERSION: &str = "0.2.0";
+const VERSION: &str = "0.3.0";
 
 #[derive(Clone)]
 struct AppState {
     geo: Arc<GeoPool>,
     geo_cache: Cache<String, GeoInfo>,
     trust_proxy: bool,
+    trust_cf: bool,
     rdns_timeout: Duration,
 }
 
@@ -59,13 +60,21 @@ fn headers_lower(headers: &HeaderMap) -> HashMap<String, String> {
     m
 }
 
-fn self_ip(headers: &HeaderMap, conn: Option<ConnectInfo<SocketAddr>>, trust: bool) -> String {
+fn self_ip(
+    headers: &HeaderMap,
+    conn: Option<ConnectInfo<SocketAddr>>,
+    trust_proxy: bool,
+    trust_cf: bool,
+) -> String {
+    let cf = headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok());
     let xff = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok());
     let sock = conn.map(|c| c.0.ip().to_string());
     let sock_ref = sock.as_deref().unwrap_or("127.0.0.1");
-    client_ip(xff, sock_ref, trust)
+    client_ip(cf, xff, sock_ref, trust_proxy, trust_cf)
 }
 
 fn geo_cached(state: &AppState, ip: &str) -> GeoInfo {
@@ -92,6 +101,7 @@ async fn index(State(s): State<Arc<AppState>>) -> impl IntoResponse {
         "service": "proxpulse-judge",
         "version": VERSION,
         "trust_proxy": s.trust_proxy,
+        "trust_cf": s.trust_cf,
         "geo_sources": s.geo.sources(),
         "endpoints": [
             "GET /generate_204",
@@ -119,7 +129,7 @@ async fn ip(
     conn: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    Json(serde_json::json!({ "ip": self_ip(&headers, conn, s.trust_proxy) }))
+    Json(serde_json::json!({ "ip": self_ip(&headers, conn, s.trust_proxy, s.trust_cf) }))
 }
 
 async fn headers_echo(
@@ -127,7 +137,7 @@ async fn headers_echo(
     conn: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&headers, conn, s.trust_proxy);
+    let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
     let raw = headers_lower(&headers);
     let chain = forwarded_chain(
         raw.get("x-forwarded-for").map(|x| x.as_str()),
@@ -153,7 +163,7 @@ async fn geo_ep(
     conn: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&headers, conn, s.trust_proxy);
+    let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
     let data = geo_cached(&s, &me);
     Json(serde_json::json!({ "ip": me, "geo": data, "source": sources_or_null(&s) }))
 }
@@ -173,7 +183,7 @@ async fn ip_type(
     headers: HeaderMap,
     Query(p): Query<RdnsParam>,
 ) -> impl IntoResponse {
-    let me = self_ip(&headers, conn, s.trust_proxy);
+    let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
     let data = geo_cached(&s, &me);
     let ptr = if p.rdns.unwrap_or(0) != 0 {
         rdns_lookup(&me, s.rdns_timeout).await
@@ -197,7 +207,7 @@ async fn judge(
     headers: HeaderMap,
     Query(p): Query<JudgeParams>,
 ) -> impl IntoResponse {
-    let me = self_ip(&headers, conn, s.trust_proxy);
+    let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
     let raw = headers_lower(&headers);
     let chain = forwarded_chain(
         raw.get("x-forwarded-for").map(|x| x.as_str()),
@@ -277,6 +287,7 @@ async fn main() {
 
     let geo_dir = env::var("GEO_DIR").unwrap_or_else(|_| "/app/geo".to_string());
     let trust_proxy = env::var("TRUST_PROXY").unwrap_or_else(|_| "1".to_string()) == "1";
+    let trust_cf = env::var("TRUST_CF").unwrap_or_else(|_| "1".to_string()) == "1";
     let rdns_timeout = Duration::from_secs_f64(
         env::var("RDNS_TIMEOUT")
             .ok()
@@ -288,6 +299,7 @@ async fn main() {
         geo: Arc::new(GeoPool::open(std::path::Path::new(&geo_dir))),
         geo_cache: Cache::builder().max_capacity(65_536).build(),
         trust_proxy,
+        trust_cf,
         rdns_timeout,
     });
 
@@ -304,7 +316,7 @@ async fn main() {
         .with_state(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-    tracing::info!("proxpulse-judge v{VERSION} on {addr} (trust_proxy={trust_proxy})");
+    tracing::info!("proxpulse-judge v{VERSION} on {addr} (trust_proxy={trust_proxy}, trust_cf={trust_cf})");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(
         listener,
@@ -329,6 +341,7 @@ mod api_tests {
             geo: Arc::new(GeoPool::open(std::path::Path::new("/nonexistent-dir-xyz"))),
             geo_cache: Cache::builder().max_capacity(1024).build(),
             trust_proxy: true,
+            trust_cf: true,
             rdns_timeout: Duration::from_millis(100),
         });
         Router::new()
@@ -389,6 +402,48 @@ mod api_tests {
             .unwrap();
         let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["anonymity"], "elite");
+    }
+
+    #[tokio::test]
+    async fn judge_via_cf_tunnel_transparent() {
+        // CF edge: exit 5.6.7.8, proxy leaked 1.1.1.1 into XFF
+        let res = test_app()
+            .oneshot(
+                Request::get("/judge?direct_ip=1.1.1.1")
+                    .header("cf-connecting-ip", "5.6.7.8")
+                    .header("x-forwarded-for", "1.1.1.1, 5.6.7.8")
+                    .header("cf-ray", "abc123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ip"], "5.6.7.8");
+        assert_eq!(v["anonymity"], "transparent");
+    }
+
+    #[tokio::test]
+    async fn judge_via_cf_tunnel_direct_is_elite() {
+        // direct check through the tunnel: CF-Connecting-IP == direct IP
+        // must NOT count as a leak
+        let res = test_app()
+            .oneshot(
+                Request::get("/judge?direct_ip=1.1.1.1")
+                    .header("cf-connecting-ip", "1.1.1.1")
+                    .header("x-forwarded-for", "1.1.1.1")
+                    .header("cf-ray", "abc123")
+                    .header("cf-ipcountry", "DE")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ip"], "1.1.1.1");
         assert_eq!(v["anonymity"], "elite");
     }
 
