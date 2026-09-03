@@ -23,7 +23,7 @@ curl http://127.0.0.1:8000/judge
 ## Вариант А — Caddy (реверс-прокси)
 
 Нужен **свой домен** (без него не выпустить HTTPS-сертификат).
-Поддомен — любой на твой вкус, например `check.yourdomain.com`:
+Поддомен — любой, например `check.yourdomain.com`:
 в DNS-панели регистратора создай **A-запись** поддомена на IP сервера,
 порты **80 и 443** должны смотреть наружу. Пример в `Caddyfile.example`:
 
@@ -51,9 +51,7 @@ cloudflared tunnel --url http://127.0.0.1:8000
 на вкладке **Public Hostname** добавь: subdomain `check`, domain твой,
 service `http://proxpulse-judge:8000` (контейнер в общей сети, см. ниже)
 или `http://127.0.0.1:8000` (cloudflared на хосте). Токен из сайта
-передай в контейнер коннектора(имя контейнера может быть любым,
-по умолчанию — tunnel, в команде ниже немного удобнее — cf-tunnel,
-если контейнер уже создан — ниже есть как добавить в сеть):
+передай в контейнер коннектора:
 
 ```sh
 docker run -d --name cf-tunnel --restart unless-stopped \
@@ -133,8 +131,8 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
    (или `content_sha256` из `/judge`).
 4. Гео и тип уже лежат в `/judge`.
 5. Для живой проверки достаточно `GET /generate_204` (пустой 204, самый
-   дешёвый запрос). `?rdns=1` включай только точечно — это DNS-резолв,
-   он медленный.
+   дешёвый запрос). `?rdns=1` — только для точечных проверок, это
+   DNS-резолв, он медленный.
 
 ## Публичный инстанс (judge для всех пользователей чекера)
 
@@ -142,7 +140,7 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 уже стоят в compose — этого хватает на десятки тысяч конкурентных
 соединений. Дожимать надо фронт и защиту:
 
-1. **Лимиты systemd у фронта** (дефолтный soft-лимит 1024): 
+1. **Лимиты systemd у фронта** (дефолтный soft-лимит 1024):
    ```sh
    sudo systemctl edit caddy   # или cloudflared
    ```
@@ -155,7 +153,7 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
    cat /proc/$(pgrep -o caddy)/limits | grep "Max open files"
    ```
    (`limits.conf` для systemd-сервисов не работает — только так.)
-2. **Очередь ядра**, если ждёшь тысячи конкурентных:
+2. **Очередь ядра** при тысячах конкурентных соединений:
    ```sh
    sysctl net.core.somaxconn fs.file-max
    echo "net.core.somaxconn = 8192" | sudo tee /etc/sysctl.d/99-proxpulse.conf
@@ -167,7 +165,7 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 4. **Рейт-лимит**: открытый `/judge` будут долбить боты. Быстрое решение —
    правило Rate Limiting в Cloudflare WAF (Security → WAF): например,
    >200 запросов/мин с IP к `/judge*` → блок на минуту. Строгий вариант —
-   встроить лимит в сам judge (отдельная задача, скажи — добавлю).
+   встроить лимит в сам judge.
 5. **Мониторинг**: `docker stats`, коды ответов фронта (всплеск 5xx/429),
    место на диске под логи.
 
@@ -184,8 +182,8 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 
 ### Лицензии баз (важно)
 
-Сами файлы в репозиторий не входят — их качаешь ты, и у каждой базы
-свои условия:
+Сами файлы в репозиторий не входят — они скачиваются отдельно,
+и у каждой базы свои условия:
 
 - **DB-IP Lite** — [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
   Обязательно указание авторства — ссылка `IP Geolocation by DB-IP`
