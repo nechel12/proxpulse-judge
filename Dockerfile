@@ -6,7 +6,7 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
     cargo build --release && rm -rf src target/release/.fingerprint/proxpulse-judge* target/release/proxpulse-judge*
 COPY src ./src
-RUN cargo build --release && strip target/release/proxpulse-judge
+RUN cargo build --release && (strip target/release/proxpulse-judge || true)
 
 FROM debian:bookworm-slim
 RUN useradd -m -u 10001 judge \

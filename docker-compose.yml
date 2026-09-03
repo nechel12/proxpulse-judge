@@ -5,7 +5,7 @@ services:
     container_name: proxpulse-judge
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8000:8000" # наружу смотрит только реверс-прокси
+      - "127.0.0.1:${PORT:-8000}:${PORT:-8000}" # наружу смотрит только реверс-прокси
     volumes:
       - ./geo:/app/geo:ro
     env_file:

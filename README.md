@@ -6,23 +6,38 @@ Self-hosted backend для проверки прокси. Один запрос 
 и фиксированный контент для проверки целостности.
 
 Стек: **Rust + axum + tokio**, базы в ОЗУ, LRU-кэш лукапов. Никаких внешних
-API, никаких лимитов, один статический бинарь в `debian:slim`.
+API, никаких лимитов, один бинарь без рантайма в `debian:slim`.
 
 ## Быстрый старт
 
 ```sh
-bash scripts/download-dbip.sh   # базы без ключей (City + ASN)
+git clone https://github.com/nechel12/proxpulse-judge.git
+cd proxpulse-judge
+bash scripts/download-dbip.sh   # качает City + ASN без ключей
 cp .env.example .env
 docker compose up -d --build
+
 curl http://127.0.0.1:8000/judge
 ```
 
-За реверс-прокси (пример в `Caddyfile.example`):
+## Вариант А — Caddy (реверс-прокси)
+
+Нужен **свой домен** (без него не выпустить HTTPS-сертификат).
+Поддомен — любой на твой вкус, например `check.yourdomain.com`:
+в DNS-панели регистратора создай **A-запись** поддомена на IP сервера,
+порты **80 и 443** должны смотреть наружу. Пример в `Caddyfile.example`:
 
 ```caddy
-check.lmtunnel.com {
+check.yourdomain.com {
     reverse_proxy 127.0.0.1:8000
 }
+```
+
+Caddy сам выпустит сертификат Let's Encrypt при первом обращении.
+Проверка:
+
+```sh
+curl https://check.yourdomain.com/healthz
 ```
 
 ## Вариант Б — Cloudflare Tunnel (без Caddy и открытых портов)
@@ -31,13 +46,13 @@ check.lmtunnel.com {
 cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
-или именованный туннель с DNS на `check.lmtunnel.com` и ingress:
+или именованный туннель с DNS на `check.yourdomain.com` и ingress:
 
 ```yaml
 tunnel: <id>
 credentials-file: /root/.cloudflared/<id>.json
 ingress:
-  - hostname: check.lmtunnel.com
+  - hostname: check.yourdomain.com
     service: http://127.0.0.1:8000
   - service: http_status:404
 ```
@@ -50,7 +65,7 @@ ingress:
 
 ```sh
 MYIP=$(curl -s https://api.ipify.org)
-curl -s "https://check.lmtunnel.com/judge?direct_ip=$MYIP" | head -c 300; echo
+curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 # ждём "anonymity":"elite"
 ```
 
@@ -65,7 +80,7 @@ curl -s "https://check.lmtunnel.com/judge?direct_ip=$MYIP" | head -c 300; echo
 | GET | `/type?rdns=1` | `{"ip", "ip_type", "signals"}` — тип IP с объяснением |
 | GET | `/content` | фиксированные байты — эталон целостности |
 | GET | `/judge?direct_ip=...&rdns=1` | всё сразу + `anonymity`, `content_sha256` |
-| GET | `/healthz` | `{"ok": true}` — для Docker/Caddy |
+| GET | `/healthz` | `{"ok": true}` — для Docker |
 
 Пример ответа `/judge`:
 
@@ -97,7 +112,8 @@ curl -s "https://check.lmtunnel.com/judge?direct_ip=$MYIP" | head -c 300; echo
 - `GeoLite2-ASN.mmdb` или `dbip-asn-lite.mmdb`
 - `GeoLite2-Country.mmdb` — фолбэк, если нет City
 
-Без файлов `geo`/`type` вернут `null`, остальное работает.
+Без файлов гео-поля будут пустыми (`"error": "no db"`, тип — `unknown`),
+остальное работает.
 После обновления баз **перезапусти контейнер** — гео-кэш живёт в памяти.
 
 ## Конфигурация
@@ -114,8 +130,8 @@ curl -s "https://check.lmtunnel.com/judge?direct_ip=$MYIP" | head -c 300; echo
 ## Почему так, а не иначе
 
 - **Почему не Python/FastAPI.** Первая версия была на FastAPI — работала,
-  но Rust даёт один бинарь без рантайма, образ `~30 МБ` вместо `~200 МБ`,
-  и нет GIL: тысячи параллельных проверок на одном потоковом пуле tokio.
+  но Rust даёт один бинарь без рантайма, компактный образ на `debian:slim`,
+  и нет GIL: сотни параллельных проверок на одном потоковом пуле tokio.
 - **Почему IP из конца XFF.** Caddy дописывает адрес клиента в конец
   цепочки — только последняя запись достоверна. Собственные заголовки
   Caddy (`X-Forwarded-Proto/Host`) исключены из детекта анонимности,

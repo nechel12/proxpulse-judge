@@ -38,6 +38,32 @@ pub fn split_xff(value: Option<&str>) -> Vec<String> {
     }
 }
 
+/// Normalize one XFF/CF address entry: trim, unwrap "[v6]:port",
+/// strip a ":port" suffix from bare IPv4 ("1.2.3.4:5678" — some
+/// proxies append it, but it is not part of the address).
+pub fn clean_host(s: &str) -> String {
+    let t = s.trim();
+    if let Some(stripped) = t.strip_prefix('[') {
+        if let Some(end) = stripped.find(']') {
+            return stripped[..end].to_string();
+        }
+        return t.to_string();
+    }
+    if let Some((ip, port)) = t.rsplit_once(':') {
+        if !port.is_empty()
+            && port.chars().all(|c| c.is_ascii_digit())
+            && ip.split('.').count() == 4
+            && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+        {
+            return ip.to_string();
+        }
+    }
+    t.to_string()
+}
+///
+/// Priority: `CF-Connecting-IP` (set by Cloudflare edge, single IP,
+/// only when trust_cf) → last X-Forwarded-For entry (appended by our
+/// own reverse proxy, only when trust_proxy) → socket address.
 /// Resolve the real client IP (= proxy exit IP when checked via proxy).
 ///
 /// Priority: `CF-Connecting-IP` (set by Cloudflare edge, single IP,
@@ -51,16 +77,15 @@ pub fn client_ip(
     trust_cf: bool,
 ) -> String {
     if trust_cf {
-        if let Some(cf) = cf_ip.map(str::trim) {
-            if !cf.is_empty() && cf.parse::<std::net::IpAddr>().is_ok() {
-                return cf.to_string();
-            }
+        let cf = clean_host(cf_ip.unwrap_or(""));
+        if !cf.is_empty() && cf.parse::<std::net::IpAddr>().is_ok() {
+            return cf;
         }
     }
     if trust_proxy {
         let chain = split_xff(xff);
         if let Some(last) = chain.last() {
-            return last.clone();
+            return clean_host(last);
         }
     }
     socket_ip.to_string()
@@ -69,9 +94,9 @@ pub fn client_ip(
 /// XFF entries added BEFORE our reverse proxy (i.e. by the checked proxy).
 pub fn forwarded_chain(xff: Option<&str>, client: &str, trust_proxy: bool) -> Vec<String> {
     if !trust_proxy {
-        return split_xff(xff);
+        return split_xff(xff).into_iter().map(|e| clean_host(&e)).collect();
     }
-    let mut chain = split_xff(xff);
+    let mut chain: Vec<String> = split_xff(xff).into_iter().map(|e| clean_host(&e)).collect();
     if chain.last().map(|s| s.as_str()) == Some(client) {
         chain.pop();
     }
@@ -312,8 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn client_ip_prefers_cf_header() {
-        // Cloudflare edge: real exit in CF-Connecting-IP, socket is the tunnel
+    fn client_ip_prefers_cf_header() {        // Cloudflare edge: real exit in CF-Connecting-IP, socket is the tunnel
         assert_eq!(
             client_ip(Some("5.6.7.8"), Some("9.9.9.9, 5.6.7.8"), "172.21.0.1", true, true),
             "5.6.7.8"
@@ -428,5 +452,22 @@ mod tests {
     fn classify_unknown() {
         let (t, _) = classify_ip(None, None, None);
         assert_eq!(t, "unknown");
+    }
+
+    #[test]
+    fn host_port_tolerance() {
+        assert_eq!(clean_host("1.2.3.4:5678"), "1.2.3.4");
+        assert_eq!(clean_host("  1.2.3.4  "), "1.2.3.4");
+        assert_eq!(clean_host("[::1]:8080"), "::1");
+        assert_eq!(clean_host("2001:db8::1"), "2001:db8::1");
+        // sloppy proxy appends source port: exit still resolves, chain strips
+        assert_eq!(
+            client_ip(None, Some("9.9.9.9:40000, 5.6.7.8"), "x", true, true),
+            "5.6.7.8"
+        );
+        assert_eq!(
+            forwarded_chain(Some("1.2.3.4:40000, 5.6.7.8"), "5.6.7.8", true),
+            vec!["1.2.3.4".to_string()]
+        );
     }
 }

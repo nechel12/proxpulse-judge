@@ -34,7 +34,6 @@ pub struct GeoInfo {
 }
 
 pub struct GeoPool {
-    dir: PathBuf,
     city: Option<Reader<Vec<u8>>>,
     city_src: Option<String>,
     country: Option<Reader<Vec<u8>>>,
@@ -99,7 +98,6 @@ impl GeoPool {
         let (country, country_src) = open_first(dir, COUNTRY_CANDIDATES);
         let (asn, asn_src) = open_first(dir, ASN_CANDIDATES);
         let pool = Self {
-            dir: dir.to_path_buf(),
             city,
             city_src,
             country,
@@ -186,7 +184,6 @@ impl GeoPool {
                 "not found".to_string()
             });
         }
-        let _ = &self.dir;
         out
     }
 }
