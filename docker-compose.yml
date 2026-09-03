@@ -15,3 +15,9 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    networks:
+      - proxpulse-net
+
+networks:
+  proxpulse-net:
+    name: proxpulse-net # фиксированное имя: compose создаст сеть, если её нет

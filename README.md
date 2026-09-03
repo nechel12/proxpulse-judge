@@ -57,6 +57,20 @@ ingress:
   - service: http_status:404
 ```
 
+> Важно, если cloudflared крутится **в docker**: `localhost` внутри его
+> контейнера — это он сам, а имя `proxpulse-judge` видно только в общей
+> сети. Поэтому контейнер туннеля должен сидеть в одной сети с judge —
+> сеть `proxpulse-net` из `docker-compose.yml` создаётся автоматически:
+>
+> ```sh
+> docker network connect proxpulse-net cf-tunnel
+> docker network inspect proxpulse-net --format '{{range .Containers}}{{.Name}} {{end}}'
+> # должны быть видны оба: proxpulse-judge и cf-tunnel
+> ```
+>
+> и в ingress/service тогда `http://proxpulse-judge:8000`.
+> cloudflared на самом хосте ходит просто на `http://127.0.0.1:8000`.
+
 Ничего менять в judge не надо: `TRUST_CF=1` по умолчанию, сервис берёт
 реальный IP из `CF-Connecting-IP` (его ставит сам Cloudflare, приоритет
 выше `X-Forwarded-For`), а все `cf-*`/`cdn-loop` заголовки исключены из
