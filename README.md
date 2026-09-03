@@ -132,6 +132,44 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 3. Целостность: `GET /content` напрямую и через прокси, сравнить байты
    (или `content_sha256` из `/judge`).
 4. Гео и тип уже лежат в `/judge`.
+5. Для живой проверки достаточно `GET /generate_204` (пустой 204, самый
+   дешёвый запрос). `?rdns=1` включай только точечно — это DNS-резолв,
+   он медленный.
+
+## Публичный инстанс (judge для всех пользователей чекера)
+
+Сам сервис лёгкий: один коннект = один fd, всё в RAM, `ulimits` 65535
+уже стоят в compose — этого хватает на десятки тысяч конкурентных
+соединений. Дожимать надо фронт и защиту:
+
+1. **Лимиты systemd у фронта** (дефолтный soft-лимит 1024): 
+   ```sh
+   sudo systemctl edit caddy   # или cloudflared
+   ```
+   ```ini
+   [Service]
+   LimitNOFILE=65535
+   ```
+   ```sh
+   sudo systemctl daemon-reload && sudo systemctl restart caddy
+   cat /proc/$(pgrep -o caddy)/limits | grep "Max open files"
+   ```
+   (`limits.conf` для systemd-сервисов не работает — только так.)
+2. **Очередь ядра**, если ждёшь тысячи конкурентных:
+   ```sh
+   sysctl net.core.somaxconn fs.file-max
+   echo "net.core.somaxconn = 8192" | sudo tee /etc/sysctl.d/99-proxpulse.conf
+   sudo sysctl --system
+   ```
+3. **Прячь origin**: для публичного использования лучше CF Tunnel —
+   IP сервера нигде не светится. На Caddy с A-записью origin публичен,
+   тогда закрой 80/443 только для диапазонов Cloudflare.
+4. **Рейт-лимит**: открытый `/judge` будут долбить боты. Быстрое решение —
+   правило Rate Limiting в Cloudflare WAF (Security → WAF): например,
+   >200 запросов/мин с IP к `/judge*` → блок на минуту. Строгий вариант —
+   встроить лимит в сам judge (отдельная задача, скажи — добавлю).
+5. **Мониторинг**: `docker stats`, коды ответов фронта (всплеск 5xx/429),
+   место на диске под логи.
 
 ## Базы
 
