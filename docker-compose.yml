@@ -1,0 +1,17 @@
+services:
+  judge:
+    build: .
+    image: proxpulse-judge:0.1.0
+    container_name: proxpulse-judge
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000" # наружу смотрит только реверс-прокси
+    volumes:
+      - ./geo:/app/geo:ro
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

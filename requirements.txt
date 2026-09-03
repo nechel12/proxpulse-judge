@@ -1,0 +1,4 @@
+fastapi>=0.115,<0.120
+uvicorn[standard]>=0.30,<0.36
+geoip2>=4.8,<5
+orjson>=3.10,<4
