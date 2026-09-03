@@ -46,6 +46,19 @@ curl https://check.yourdomain.com/healthz
 cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
+или вообще без команд в конфигах — через сайт Cloudflare:
+**Zero Trust → Networks → Tunnels → Create a tunnel**, задай имя,
+на вкладке **Public Hostname** добавь: subdomain `check`, domain твой,
+service `http://proxpulse-judge:8000` (контейнер в общей сети, см. ниже)
+или `http://127.0.0.1:8000` (cloudflared на хосте). Токен из сайта
+передай в контейнер коннектора:
+
+```sh
+docker run -d --name cf-tunnel --restart unless-stopped \
+  --network proxpulse-net \
+  cloudflare/cloudflared:latest tunnel --no-autoupdate run --token <TOKEN>
+```
+
 или именованный туннель с DNS на `check.yourdomain.com` и ingress:
 
 ```yaml
