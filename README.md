@@ -51,7 +51,9 @@ cloudflared tunnel --url http://127.0.0.1:8000
 на вкладке **Public Hostname** добавь: subdomain `check`, domain твой,
 service `http://proxpulse-judge:8000` (контейнер в общей сети, см. ниже)
 или `http://127.0.0.1:8000` (cloudflared на хосте). Токен из сайта
-передай в контейнер коннектора:
+передай в контейнер коннектора(имя контейнера может быть любым,
+по умолчанию — tunnel, в команде ниже немного удобнее — cf-tunnel,
+если контейнер уже создан — ниже есть как добавить в сеть):
 
 ```sh
 docker run -d --name cf-tunnel --restart unless-stopped \
