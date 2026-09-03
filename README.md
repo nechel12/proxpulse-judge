@@ -143,7 +143,32 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 
 Без файлов гео-поля будут пустыми (`"error": "no db"`, тип — `unknown`),
 остальное работает.
-После обновления баз **перезапусти контейнер** — гео-кэш живёт в памяти.
+
+### Лицензии баз (важно)
+
+Сами файлы в репозиторий не входят — их качаешь ты, и у каждой базы
+свои условия:
+
+- **DB-IP Lite** — [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+  Обязательно указание авторства — ссылка `IP Geolocation by DB-IP`
+  на <https://db-ip.com> там, где показываются результаты из базы.
+  Обновляются **раз в месяц**. Подробнее: <https://db-ip.com/db/lite.php>
+- **MaxMind GeoLite2** (City / ASN / Country) — нужны бесплатный аккаунт
+  и ключ. Использование регулируется
+  [GeoLite EULA](https://www.maxmind.com/en/geolite/eula) (включает аспекты
+  [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)).
+  Обязательно указание авторства: `This product includes GeoLite2 Data
+  created by MaxMind, available from https://www.maxmind.com`.
+
+### Базы сами обновляются? Нет
+
+`scripts/download-dbip.sh` — ручной: скачал → файлы легли в `./geo` →
+**перезапусти контейнер** (гео-кэш живёт в памяти, без рестарта новые
+файлы не подхватятся). Для автоматизации — cron раз в месяц + рестарт:
+
+```cron
+0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
+```
 
 ## Конфигурация
 
