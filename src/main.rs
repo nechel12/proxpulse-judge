@@ -27,12 +27,14 @@ use std::{
 use geo::{GeoInfo, GeoPool};
 use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
 
-const VERSION: &str = "0.3.0";
+const VERSION: &str = "0.4.0";
 
 #[derive(Clone)]
 struct AppState {
     geo: Arc<GeoPool>,
     geo_cache: Cache<String, GeoInfo>,
+    ptr_cache: Cache<String, Option<String>>,
+    rdns_sem: Arc<tokio::sync::Semaphore>,
     trust_proxy: bool,
     trust_cf: bool,
     rdns_timeout: Duration,
@@ -41,12 +43,6 @@ struct AppState {
 #[derive(Deserialize)]
 struct JudgeParams {
     direct_ip: Option<String>,
-    rdns: Option<u8>,
-}
-
-#[derive(Deserialize)]
-struct RdnsParam {
-    rdns: Option<u8>,
 }
 
 fn headers_lower(headers: &HeaderMap) -> HashMap<String, String> {
@@ -94,6 +90,24 @@ async fn rdns_lookup(ip: &str, timeout: Duration) -> Option<String> {
         Ok(Ok(v)) => v,
         _ => None,
     }
+}
+
+/// Server-side rDNS policy: resolve only when the ASN org is missing
+/// (otherwise PTR adds nothing worth a DNS round-trip), at most
+/// RDNS_MAX_CONCURRENT resolutions at once, results cached for an hour.
+/// The client cannot request rDNS — there is no such parameter.
+async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<String> {
+    if aso.map(|o| !o.trim().is_empty()).unwrap_or(false) {
+        return None;
+    }
+    let key = ip.to_string();
+    if let Some(hit) = state.ptr_cache.get(&key) {
+        return hit;
+    }
+    let _permit = state.rdns_sem.try_acquire().ok()?;
+    let res = rdns_lookup(ip, state.rdns_timeout).await;
+    state.ptr_cache.insert(key, res.clone());
+    res
 }
 
 async fn index(State(s): State<Arc<AppState>>) -> impl IntoResponse {
@@ -181,15 +195,10 @@ async fn ip_type(
     State(s): State<Arc<AppState>>,
     conn: Option<ConnectInfo<SocketAddr>>,
     headers: HeaderMap,
-    Query(p): Query<RdnsParam>,
 ) -> impl IntoResponse {
     let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
     let data = geo_cached(&s, &me);
-    let ptr = if p.rdns.unwrap_or(0) != 0 {
-        rdns_lookup(&me, s.rdns_timeout).await
-    } else {
-        None
-    };
+    let ptr = maybe_rdns(&s, &me, data.aso.as_deref()).await;
     let (t, signals) = classify_ip(data.aso.as_deref(), None, ptr.as_deref());
     Json(serde_json::json!({ "ip": me, "ip_type": t, "signals": signals }))
 }
@@ -224,11 +233,7 @@ async fn judge(
     let level = anonymity_level(&for_analysis, p.direct_ip.as_deref());
 
     let g = geo_cached(&s, &me);
-    let ptr = if p.rdns.unwrap_or(0) != 0 {
-        rdns_lookup(&me, s.rdns_timeout).await
-    } else {
-        None
-    };
+    let ptr = maybe_rdns(&s, &me, g.aso.as_deref()).await;
     let (t, signals) = classify_ip(g.aso.as_deref(), None, ptr.as_deref());
 
     Json(serde_json::json!({
@@ -298,6 +303,11 @@ async fn main() {
     let state = Arc::new(AppState {
         geo: Arc::new(GeoPool::open(std::path::Path::new(&geo_dir))),
         geo_cache: Cache::builder().max_capacity(65_536).build(),
+        ptr_cache: Cache::builder()
+            .max_capacity(65_536)
+            .time_to_live(Duration::from_secs(3600))
+            .build(),
+        rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
         trust_proxy,
         trust_cf,
         rdns_timeout,
@@ -340,6 +350,8 @@ mod api_tests {
         let state = Arc::new(AppState {
             geo: Arc::new(GeoPool::open(std::path::Path::new("/nonexistent-dir-xyz"))),
             geo_cache: Cache::builder().max_capacity(1024).build(),
+            ptr_cache: Cache::builder().max_capacity(1024).build(),
+            rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
             trust_proxy: true,
             trust_cf: true,
             rdns_timeout: Duration::from_millis(100),
@@ -445,6 +457,24 @@ mod api_tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["ip"], "1.1.1.1");
         assert_eq!(v["anonymity"], "elite");
+    }
+
+    #[tokio::test]
+    async fn rdns_skipped_when_asn_known() {
+        // ASN org present → no DNS round-trip at all (fast, offline-safe)
+        let state = Arc::new(AppState {
+            geo: Arc::new(GeoPool::open(std::path::Path::new("/nonexistent-dir-xyz"))),
+            geo_cache: Cache::builder().max_capacity(16).build(),
+            ptr_cache: Cache::builder().max_capacity(16).build(),
+            rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
+            trust_proxy: true,
+            trust_cf: true,
+            rdns_timeout: Duration::from_millis(50),
+        });
+        let t0 = std::time::Instant::now();
+        let res = maybe_rdns(&state, "8.8.8.8", Some("Google LLC")).await;
+        assert!(res.is_none());
+        assert!(t0.elapsed() < Duration::from_secs(5));
     }
 
     #[tokio::test]

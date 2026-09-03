@@ -104,9 +104,9 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 | GET | `/ip` | `{"ip": "..."}` — IP выхода |
 | GET | `/headers` | `{"ip", "headers", "xff_chain"}` — эхо заголовков |
 | GET | `/geo` | `{"ip", "geo", "source"}` — страна/город/ASN из локальных баз |
-| GET | `/type?rdns=1` | `{"ip", "ip_type", "signals"}` — тип IP с объяснением |
+| GET | `/type` | `{"ip", "ip_type", "signals"}` — тип IP с объяснением |
 | GET | `/content` | фиксированные байты — эталон целостности |
-| GET | `/judge?direct_ip=...&rdns=1` | всё сразу + `anonymity`, `content_sha256` |
+| GET | `/judge?direct_ip=...` | всё сразу + `anonymity`, `content_sha256` |
 | GET | `/healthz` | `{"ok": true}` — для Docker |
 
 Пример ответа `/judge`:
@@ -129,10 +129,12 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
    `transparent` (утёк реальный IP).
 3. Целостность: `GET /content` напрямую и через прокси, сравнить байты
    (или `content_sha256` из `/judge`).
-4. Гео и тип уже лежат в `/judge`.
+4. Гео и тип уже лежат в `/judge`. Отдельного параметра для rDNS нет:
+   сервер сам резолвит PTR, только когда ASN-орга отсутствует (иначе это
+   ничего не меняет), не больше 16 резолвов параллельно, ответы кэшируются
+   на час.
 5. Для живой проверки достаточно `GET /generate_204` (пустой 204, самый
-   дешёвый запрос). `?rdns=1` — только для точечных проверок, это
-   DNS-резолв, он медленный.
+   дешёвый запрос).
 
 ## Публичный инстанс
 
@@ -150,8 +152,8 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 Превышение отдаёт именно блок, а не challenge: API-клиенты капчу
 не пройдут.
 
-Просьба: `?rdns=1` — тяжёлый параметр (живой DNS-резолв на каждый запрос),
-использовать точечно, а не пачкой на весь список.
+Просьба: reverse-DNS сервер делает сам и только при неизвестной ASN-орге,
+так что со стороны клиента дёргать нечего — просто не флудите.
 
 ## Базы
 
@@ -198,7 +200,7 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 | `GEO_DIR` | `/app/geo` | каталог `.mmdb` |
 | `TRUST_PROXY` | `1` | `1` — за Caddy (IP из конца `X-Forwarded-For`), `0` — напрямую (IP из сокета) |
 | `TRUST_CF` | `1` | `1` — верить `CF-Connecting-IP` (Cloudflare Tunnel), `0` — игнорировать |
-| `RDNS_TIMEOUT` | `1.5` | таймаут reverse-DNS для `?rdns=1`, сек |
+| `RDNS_TIMEOUT` | `1.5` | таймаут серверного rDNS, сек |
 | `RUST_LOG` | `info` | уровень логов |
 
 ## Почему так, а не иначе
