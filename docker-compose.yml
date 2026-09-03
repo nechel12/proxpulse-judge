@@ -10,6 +10,10 @@ services:
       - ./geo:/app/geo:ro
     env_file:
       - .env
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     healthcheck:
       test: ["CMD", "/app/proxpulse-judge", "--healthcheck"]
       interval: 30s
