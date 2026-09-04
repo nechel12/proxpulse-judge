@@ -2,9 +2,10 @@
 # Пушит ghcr.io/<owner>/proxpulse-judge:latest + :YYYYMM.
 # Образ собирается БЕЗ кэша слоёв специально: иначе закэшируется и стадия
 # скачивания баз, и monthly-обновление молча перестанет обновляться.
-# Первый запуск — руками (Actions → docker → Run workflow): после него
-# переключи видимость пакета в public (ghcr.io → proxpulse-judge →
-# Package settings → Change visibility), иначе Render не спулллит образ.
+# Первый запуск — руками (Actions → docker → Run workflow). Пакет
+# обычно наследует public от публичного репо; если Render ругнётся
+# Image Pull Failed — проверь видимость: профиль → Packages →
+# proxpulse-judge → Package settings → Change visibility → public.
 name: docker
 
 on:
