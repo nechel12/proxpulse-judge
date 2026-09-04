@@ -105,6 +105,51 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 # expect "anonymity":"elite"
 ```
 
+## Variant C — Render (free hosting, no VPS)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/nechel12/proxpulse-judge)
+
+A ready image with embedded DB-IP Lite rebuilds itself every month
+(`.github/workflows/docker.yml` → `ghcr.io/nechel12/proxpulse-judge:latest`),
+no disk needed. Hit the button — Render spins up the service from
+`render.yaml` and hands you a free `https://<name>.onrender.com`. Put
+that URL into the checker. No Cloudflare Tunnel here: Render itself
+provides TLS and the domain.
+
+Free-plan notes:
+
+- The service sleeps after 15 minutes without traffic and wakes up in
+  about a minute. The first check after idle may partially fail on
+  timeouts — just repeat it. One service barely fits into the free
+  750 h/month.
+- The filesystem is ephemeral, but that is fine: the databases are
+  baked into the image.
+- `TRUST_CF=1` is required (Render sits behind Cloudflare, the real IP
+  comes from `CF-Connecting-IP`) — already set in `render.yaml`, keep it.
+  Never set `PORT` — Render injects it.
+- The image carries DB-IP Lite only: MaxMind forbids redistribution in
+  a public image. Want MaxMind — use the VPS + volume variant above.
+
+Database updates (the image rebuilds on the 3rd of every month):
+
+1. **Fork + auto-hook.** Fork the repo, enable workflows in the fork's
+   Actions tab (disabled by default), add a `RENDER_DEPLOY_HOOK` secret
+   (Render dashboard → your service → Settings → Deploy Hook), and point
+   the fork's `render.yaml` at your own
+   `ghcr.io/<you>/proxpulse-judge:latest`. Fresh images then flow into
+   your GHCR and trigger redeploys by themselves. Caveat: the schedule
+   goes dormant after 60 days without activity in the fork — poke it
+   manually sometimes (the workflow has Run workflow).
+2. **Manually.** Render dashboard → service → Manual Deploy →
+   Deploy latest reference. Geo drifts slowly — enough for most.
+3. **Your own cron, no fork.** The service can track
+   `ghcr.io/nechel12/proxpulse-judge:latest` directly while any external
+   cron (your server, cron-job.org, etc.) hits your deploy hook monthly.
+
+The same image fits other container hostings too: all they need is
+`$PORT` passthrough and `/healthz` as the health check. Running it
+somewhere else — extend this section.
+
 ## Endpoints
 
 | Method | Path | Purpose |
@@ -201,6 +246,11 @@ monthly cron + restart:
 ```cron
 0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
 ```
+
+If `./geo` has no `.mmdb` at all (forgot to download), the container
+entrypoint fetches DB-IP Lite itself on startup. Your own files
+(MaxMind or DB-IP) always win — the fallback only fires on an empty
+directory.
 
 ## Maintenance: logs
 

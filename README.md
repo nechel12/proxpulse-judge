@@ -103,6 +103,48 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 # ждём "anonymity":"elite"
 ```
 
+## Вариант В — Render (бесплатный хостинг, без VPS)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/nechel12/proxpulse-judge)
+
+Готовый образ со вшитыми DB-IP Lite собирается сам каждый месяц
+(`.github/workflows/docker.yml` → `ghcr.io/nechel12/proxpulse-judge:latest`),
+диск не нужен. Жми кнопку — Render поднимет сервис по `render.yaml`
+и выдаст бесплатный `https://<имя>.onrender.com`. Этот URL и вписывай
+в чекер. Cloudflare Tunnel здесь не нужен: TLS и домен даёт сам Render.
+
+Что надо знать про free-план:
+
+- Сервис засыпает после 15 минут без трафика и просыпается ~минуту.
+  Первая проверка после простоя может частично отвалиться по таймауту —
+  просто повтори. Один сервис влезает в бесплатные 750 ч/мес впритык.
+- Файловая система эфемерна, но это не страшно: базы вшиты в образ.
+- `TRUST_CF=1` обязателен (Render сидит за Cloudflare, реальный IP
+  берётся из `CF-Connecting-IP`) — в `render.yaml` уже выставлен, не убирай.
+  `PORT` задавать нельзя — Render инжектит его сам.
+- В образе только DB-IP Lite: MaxMind по лицензии нельзя раздавать
+  в публичном образе. Хочешь MaxMind — это вариант с VPS + volume выше.
+
+Обновление баз (образ пересобирается 3-го числа каждого месяца):
+
+1. **Форк + автохук.** Форкни репо, во вкладке Actions форка включи
+   воркфлоу (по умолчанию выключены), в Secrets добавь `RENDER_DEPLOY_HOOK`
+   (Render dashboard → твой сервис → Settings → Deploy Hook), а в
+   `render.yaml` форка поменяй образ на свой
+   `ghcr.io/<ты>/proxpulse-judge:latest`. Дальше свежий образ сам едет
+   в твой GHCR и дёргает редеплой. Нюанс: шедула гаснет после 60 дней
+   без активности в форке — дёргай иногда руками (у воркфлоу есть
+   Run workflow).
+2. **Вручную.** Render dashboard → сервис → Manual Deploy →
+   Deploy latest reference. Гео дрейфует медленно — многим хватает.
+3. **Свой крон без форка.** Сервис может смотреть прямо на
+   `ghcr.io/nechel12/proxpulse-judge:latest`, а раз в месяц дёргать
+   твой deploy hook любым внешним кроном (свой сервер, cron-job.org и т.п.).
+
+Тот же образ подойдёт и другим хостингам контейнеров: нужен только
+проброс `$PORT` и `/healthz` как health-check. Если заведёшь где-то
+ещё — дополни этот раздел.
+
 ## Эндпоинты
 
 | Метод | Путь | Назначение |
@@ -200,6 +242,10 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 ```cron
 0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
 ```
+
+Если в `./geo` вообще нет `.mmdb` (забыл скачать), entrypoint контейнера
+сам скачает DB-IP Lite при старте. Свои файлы (MaxMind или DB-IP)
+всегда в приоритете — фолбэк срабатывает только на пустой каталог.
 
 ## Обслуживание: логи
 

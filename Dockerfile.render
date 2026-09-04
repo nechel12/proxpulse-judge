@@ -1,0 +1,46 @@
+# Free-hosting вариант (Render и т.п.): DB-IP Lite вшиты в образ,
+# диск не нужен, контейнер полностью stateless.
+# DB-IP Lite распространяется под CC BY 4.0 — атрибуция обязательна:
+# "IP Geolocation by DB-IP" со ссылкой https://db-ip.com
+# (см. также GET / — лицензии отдаются самим сервисом).
+# MaxMind GeoLite2 сюда класть НЕЛЬЗЯ (EULA запрещает публичную
+# редистрибуцию) — для MaxMind используй обычный Dockerfile + volume.
+# VPS-путь (docker-compose.yml + ./geo) этот файл никак не затрагивает.
+FROM rust:bookworm AS build
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+# prefetch deps for layer caching
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
+    cargo build --release && rm -rf src target/release/.fingerprint/proxpulse-judge* target/release/proxpulse-judge*
+COPY src ./src
+RUN cargo build --release && (strip target/release/proxpulse-judge || true)
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        bash curl ca-certificates unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 10001 judge \
+    && mkdir -p /app/geo /app/scripts \
+    && chown -R judge:judge /app
+COPY --from=build /build/target/release/proxpulse-judge /app/proxpulse-judge
+COPY scripts/download-dbip.sh scripts/docker-entrypoint.sh /app/scripts/
+# Печём свежие базы прямо в образ (долгая стадия: city ~130 МБ).
+# Entrypoint при старте увидит .mmdb и ничего качать не будет.
+RUN GEO_DIR=/app/geo bash /app/scripts/download-dbip.sh && chown -R judge:judge /app/geo
+USER judge
+
+ENV GEO_DIR=/app/geo \
+    TRUST_PROXY=1 \
+    TRUST_CF=1 \
+    RUST_LOG=info
+
+EXPOSE 8000
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD ["/app/proxpulse-judge", "--healthcheck"]
+
+ENTRYPOINT ["bash", "/app/scripts/docker-entrypoint.sh"]
+
+LABEL org.opencontainers.image.title="proxpulse-judge" \
+      org.opencontainers.image.description="Self-hosted proxy-check backend with embedded DB-IP Lite geo DBs (CC BY 4.0, IP Geolocation by DB-IP https://db-ip.com)" \
+      org.opencontainers.image.source="https://github.com/nechel12/proxpulse-judge" \
+      org.opencontainers.image.licenses="Apache-2.0"

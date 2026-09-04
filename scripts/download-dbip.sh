@@ -5,12 +5,14 @@
 # (подробности: https://db-ip.com/db/lite.php).
 # Выходят раз в месяц, САМИ НЕ ОБНОВЛЯЮТСЯ: запускай скрипт руками или
 # по cron, после чего перезапусти контейнер (docker compose restart judge).
+# Каталог назначения: $GEO_DIR, иначе ../geo относительно скрипта.
+# Entrypoint контейнера сам зовёт этот скрипт, если в $GEO_DIR нет .mmdb.
 set -euo pipefail
 # сначала пробуем текущий месяц, в первые дни месяца файла может не быть —
 # тогда берём прошлый (на VPS Linux с GNU date)
 MONTHS="$(date +%Y-%m) $(date -d 'last month' +%Y-%m 2>/dev/null || true)"
 if [ $# -ge 1 ]; then MONTHS="$1"; fi   # можно передать 2026-08 вручную
-DIR="$(dirname "$0")/../geo"
+DIR="${GEO_DIR:-$(dirname "$0")/../geo}"
 mkdir -p "$DIR"
 for M in $MONTHS; do
   echo "== trying DB-IP Lite $M"

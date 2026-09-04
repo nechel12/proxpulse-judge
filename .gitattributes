@@ -1,0 +1,5 @@
+# Shell-скрипты и Dockerfile всегда с LF: иначе сборка Linux-образа
+# из Windows-чекаута положит в контейнер скрипты с CRLF и bash их
+# не выполнит (bad interpreter / syntax error).
+*.sh text eol=lf
+Dockerfile* text eol=lf

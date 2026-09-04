@@ -1,0 +1,22 @@
+# Blueprint: деплой готового образа с вшитыми DB-IP Lite в один клик.
+# Кнопка: https://render.com/deploy?repo=https://github.com/nechel12/proxpulse-judge
+# Образ собирается monthly-воркфлоу (.github/workflows/docker.yml) и лежит в
+# ghcr.io/nechel12/proxpulse-judge:latest (пакет должен быть публичным).
+# ВАЖНО: PORT не задаём — Render инжектит его сам, сервер читает $PORT.
+# TRUST_CF=1 обязателен: Render сидит за Cloudflare, реальный IP клиента
+# берётся из CF-Connecting-IP (см. README, вариант В).
+services:
+  - type: web
+    name: proxpulse-judge
+    runtime: image
+    image:
+      url: ghcr.io/nechel12/proxpulse-judge:latest
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: TRUST_PROXY
+        value: 1
+      - key: TRUST_CF
+        value: 1
+      - key: RUST_LOG
+        value: info

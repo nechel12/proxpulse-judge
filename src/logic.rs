@@ -88,11 +88,23 @@ pub fn client_ip(
 }
 
 /// XFF entries added BEFORE our reverse proxy (i.e. by the checked proxy).
+/// Our edge always appends its own downstream last: normally that is the
+/// client itself (Caddy/nginx write the connecting IP, which is also what
+/// [`client_ip`] resolves) and the pop below removes it. But when an outer
+/// CDN sits in front of our edge (Cloudflare in front of Render: CF writes
+/// the client, Render appends the CDN egress IP), the last entry is
+/// infrastructure, not the client — drop it first, then the usual pop
+/// removes the client entry the CDN wrote. Without CF in the path the last
+/// entry always equals the client, so the first pop never fires and the
+/// Caddy/VPS behaviour is unchanged.
 pub fn forwarded_chain(xff: Option<&str>, client: &str, trust_proxy: bool) -> Vec<String> {
     if !trust_proxy {
         return split_xff(xff).into_iter().map(|e| clean_host(&e)).collect();
     }
     let mut chain: Vec<String> = split_xff(xff).into_iter().map(|e| clean_host(&e)).collect();
+    if chain.last().map(|s| s.as_str()) != Some(client) {
+        chain.pop();
+    }
     if chain.last().map(|s| s.as_str()) == Some(client) {
         chain.pop();
     }
@@ -382,6 +394,37 @@ mod tests {
             forwarded_chain(Some("1.2.3.4"), "9.9.9.9", false),
             vec!["1.2.3.4"]
         );
+    }
+
+    #[test]
+    fn chain_strips_render_cdn_egress() {
+        // Render shape: CF wrote the client, Render appended the CDN
+        // egress IP last — both must go, the rest is the checked proxy.
+        // Direct check: client 1.2.3.4, CDN egress 5.6.7.8.
+        assert!(forwarded_chain(Some("1.2.3.4, 5.6.7.8"), "1.2.3.4", true).is_empty());
+        // Elite proxy: exit 9.9.9.9, CDN egress 5.6.7.8.
+        assert!(forwarded_chain(Some("9.9.9.9, 5.6.7.8"), "9.9.9.9", true).is_empty());
+        // Transparent proxy: leaked 1.2.3.4 survives, infra does not.
+        assert_eq!(
+            forwarded_chain(Some("1.2.3.4, 9.9.9.9, 5.6.7.8"), "9.9.9.9", true),
+            vec!["1.2.3.4"]
+        );
+    }
+
+    #[test]
+    fn render_direct_check_is_elite_not_transparent() {
+        // Full Render-shaped request: CF-Connecting-IP is the client,
+        // XFF carries [client, CDN-egress]. Must be elite, not transparent.
+        let h = map(&[
+            ("cf-connecting-ip", "1.1.1.1"),
+            ("cf-ray", "abc123"),
+            ("x-forwarded-for", "1.1.1.1, 5.6.7.8"),
+        ]);
+        let chain = forwarded_chain(h.get("x-forwarded-for").map(|s| s.as_str()), "1.1.1.1", true);
+        assert!(chain.is_empty());
+        let mut for_analysis = h.clone();
+        for_analysis.insert("x-forwarded-for".to_string(), chain.join(", "));
+        assert_eq!(anonymity_level(&for_analysis, Some("1.1.1.1")), "elite");
     }
 
     #[test]
