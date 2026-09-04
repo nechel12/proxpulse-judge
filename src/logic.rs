@@ -60,10 +60,6 @@ pub fn clean_host(s: &str) -> String {
     }
     t.to_string()
 }
-///
-/// Priority: `CF-Connecting-IP` (set by Cloudflare edge, single IP,
-/// only when trust_cf) → last X-Forwarded-For entry (appended by our
-/// own reverse proxy, only when trust_proxy) → socket address.
 /// Resolve the real client IP (= proxy exit IP when checked via proxy).
 ///
 /// Priority: `CF-Connecting-IP` (set by Cloudflare edge, single IP,
@@ -249,7 +245,6 @@ fn hits(text: &str, keywords: &[&str]) -> Vec<String> {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TypeSignals {
     pub org: Option<String>,
-    pub asn_org: Option<String>,
     pub rdns: Option<String>,
     pub hosting_kw: Vec<String>,
     pub hosting_vendor: Vec<String>,
@@ -263,23 +258,32 @@ pub struct TypeSignals {
 /// Heuristic IP type. Local data can't prove residential-vs-business
 /// the way paid ASN DBs do — `TypeSignals` exposes WHY, so callers
 /// (and humans) can judge.
-pub fn classify_ip(
-    org: Option<&str>,
-    asn_org: Option<&str>,
-    rdns: Option<&str>,
-) -> (String, TypeSignals) {
-    let hay_org = format!("{} {}", org.unwrap_or(""), asn_org.unwrap_or(""));
+pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (String, TypeSignals) {
+    let hay_org = org.unwrap_or("").to_string();
     let hay_all = format!("{} {}", hay_org, rdns.unwrap_or(""));
     let hosting_kw = hits(&hay_org, HOSTING_KW);
     let low = hay_org.to_ascii_lowercase();
+    // single-word vendors match whole tokens only: substring matching
+    // would flag e.g. "Shaw Communications" via "aws". Multi-word
+    // vendors ("oracle cloud") are long enough for substring matching.
+    let tokens: Vec<&str> = low
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
     let hosting_vendor: Vec<String> = HOSTING_VENDORS
         .iter()
-        .filter(|v| low.contains(**v))
-        .map(|v| v.to_string())
+        .filter(|v| {
+            let v: &str = v;
+            if v.contains(' ') {
+                low.contains(v)
+            } else {
+                tokens.contains(&v)
+            }
+        })
+        .map(|v| (*v).to_string())
         .collect();
     let mut signals = TypeSignals {
         org: org.map(str::to_string),
-        asn_org: asn_org.map(str::to_string),
         rdns: rdns.map(str::to_string),
         hosting_kw,
         hosting_vendor,
@@ -337,14 +341,27 @@ mod tests {
     }
 
     #[test]
-    fn client_ip_prefers_cf_header() {        // Cloudflare edge: real exit in CF-Connecting-IP, socket is the tunnel
+    fn client_ip_prefers_cf_header() {
+        // Cloudflare edge: real exit in CF-Connecting-IP, socket is the tunnel
         assert_eq!(
-            client_ip(Some("5.6.7.8"), Some("9.9.9.9, 5.6.7.8"), "172.21.0.1", true, true),
+            client_ip(
+                Some("5.6.7.8"),
+                Some("9.9.9.9, 5.6.7.8"),
+                "172.21.0.1",
+                true,
+                true
+            ),
             "5.6.7.8"
         );
         // garbage CF value is ignored, XFF fallback still works
         assert_eq!(
-            client_ip(Some("not-an-ip"), Some("9.9.9.9, 5.6.7.8"), "172.21.0.1", true, true),
+            client_ip(
+                Some("not-an-ip"),
+                Some("9.9.9.9, 5.6.7.8"),
+                "172.21.0.1",
+                true,
+                true
+            ),
             "5.6.7.8"
         );
         // trust_cf off → CF header ignored
@@ -431,26 +448,34 @@ mod tests {
 
     #[test]
     fn classify_datacenter() {
-        let (t, s) = classify_ip(Some("Hetzner Online GmbH"), None, None);
+        let (t, s) = classify_ip(Some("Hetzner Online GmbH"), None);
         assert_eq!(t, "datacenter");
         assert!(!s.hosting_kw.is_empty() || !s.hosting_vendor.is_empty());
     }
 
     #[test]
     fn classify_mobile() {
-        let (t, _) = classify_ip(Some("Mobile TeleSystems PJSC"), None, None);
+        let (t, _) = classify_ip(Some("Mobile TeleSystems PJSC"), None);
         assert_eq!(t, "mobile");
     }
 
     #[test]
+    fn vendor_substring_no_false_positive() {
+        // "Shaw" contains "aws" — must NOT match the vendor list
+        let (t, s) = classify_ip(Some("Shaw Communications"), None);
+        assert!(s.hosting_vendor.is_empty());
+        assert_eq!(t, "residential");
+    }
+
+    #[test]
     fn classify_residential_default() {
-        let (t, _) = classify_ip(Some("Rostelecom"), None, None);
+        let (t, _) = classify_ip(Some("Rostelecom"), None);
         assert_eq!(t, "residential");
     }
 
     #[test]
     fn classify_unknown() {
-        let (t, _) = classify_ip(None, None, None);
+        let (t, _) = classify_ip(None, None);
         assert_eq!(t, "unknown");
     }
 

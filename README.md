@@ -1,5 +1,7 @@
 # ProxPulse Judge
 
+*([English version](README_EN.md))*
+
 Self-hosted backend для проверки прокси. Один запрос `GET /judge` заменяет
 пачку внешних сервисов (ip-api, httpbin): видит IP выхода прокси, резолвит
 гео в **локальных** `.mmdb`, отдаёт эхо заголовков для детекта анонимности
@@ -245,7 +247,7 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 ## Разработка
 
 ```sh
-cargo test        # 33 теста: логика, geo-парсинг, API, лимиты
+cargo test        # 34 теста: логика, geo-парсинг, API, лимиты
 cargo run         # PORT=8000 GEO_DIR=./geo TRUST_PROXY=0
 ```
 

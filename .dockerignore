@@ -2,3 +2,4 @@
 geo/*.mmdb
 geo/*.mmdb.gz
 .env
+.git/

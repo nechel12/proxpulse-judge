@@ -27,7 +27,7 @@ use std::{
 use geo::{GeoInfo, GeoPool};
 use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
 
-const VERSION: &str = "0.5.1";
+const VERSION: &str = "0.5.2";
 
 /// Fixed-window-ish per-IP limiter: at most `per_minute` requests
 /// in any rolling 60s window. 0 disables. Pure function for testability:
@@ -41,7 +41,11 @@ fn check_limit(
     // occasional full sweep so spoofed keys can't grow the map forever
     if hits.len() > 200_000 {
         hits.retain(|_, q| {
-            while q.front().map(|t| now.duration_since(*t).as_secs() >= 60).unwrap_or(false) {
+            while q
+                .front()
+                .map(|t| now.duration_since(*t).as_secs() >= 60)
+                .unwrap_or(false)
+            {
                 q.pop_front();
             }
             !q.is_empty()
@@ -51,7 +55,11 @@ fn check_limit(
         }
     }
     let q = hits.entry(key.to_string()).or_default();
-    while q.front().map(|t| now.duration_since(*t).as_secs() >= 60).unwrap_or(false) {
+    while q
+        .front()
+        .map(|t| now.duration_since(*t).as_secs() >= 60)
+        .unwrap_or(false)
+    {
         q.pop_front();
     }
     if q.len() as u32 >= limit {
@@ -74,10 +82,7 @@ async fn rate_limit_mw(
 ) -> impl IntoResponse {
     let path = req.uri().path().to_string();
     if s.rate_limit.per_minute > 0 && path != "/healthz" && path != "/" {
-        let conn = req
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .cloned();
+        let conn = req.extensions().get::<ConnectInfo<SocketAddr>>().cloned();
         let key = self_ip(req.headers(), conn, s.trust_proxy, s.trust_cf);
         let retry = {
             let mut hits = s.rate_limit.hits.lock().unwrap();
@@ -137,9 +142,7 @@ fn self_ip(
     let cf = headers
         .get("cf-connecting-ip")
         .and_then(|v| v.to_str().ok());
-    let xff = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok());
+    let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
     let sock = conn.map(|c| c.0.ip().to_string());
     let sock_ref = sock.as_deref().unwrap_or("127.0.0.1");
     client_ip(cf, xff, sock_ref, trust_proxy, trust_cf)
@@ -283,7 +286,7 @@ async fn ip_type(
     let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
     let data = geo_cached(&s, &me);
     let ptr = maybe_rdns(&s, &me, data.aso.as_deref()).await;
-    let (t, signals) = classify_ip(data.aso.as_deref(), None, ptr.as_deref());
+    let (t, signals) = classify_ip(data.aso.as_deref(), ptr.as_deref());
     Json(serde_json::json!({ "ip": me, "ip_type": t, "signals": signals }))
 }
 
@@ -327,7 +330,7 @@ async fn judge(
 
     let g = geo_cached(&s, &me);
     let ptr = maybe_rdns(&s, &me, g.aso.as_deref()).await;
-    let (t, signals) = classify_ip(g.aso.as_deref(), None, ptr.as_deref());
+    let (t, signals) = classify_ip(g.aso.as_deref(), ptr.as_deref());
 
     no_store_json(serde_json::json!({
         "ip": me,
@@ -360,8 +363,7 @@ fn healthcheck(port: u16) -> bool {
         Err(_) => return false,
     };
     s.set_read_timeout(Some(Duration::from_secs(4))).ok();
-    if s
-        .write_all(b"GET /healthz HTTP/1.0\r\nHost: x\r\n\r\n")
+    if s.write_all(b"GET /healthz HTTP/1.0\r\nHost: x\r\n\r\n")
         .is_err()
     {
         return false;
@@ -372,7 +374,27 @@ fn healthcheck(port: u16) -> bool {
 }
 
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    let ctrl_c = async {
+        tokio::signal::ctrl_c().await.ok();
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            // no SIGTERM source: never resolve
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    // Docker sends SIGTERM on `stop` — without this arm the container
+    // would die mid-request instead of draining gracefully.
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 #[tokio::main]
@@ -452,10 +474,7 @@ async fn main() {
 #[cfg(test)]
 mod api_tests {
     use super::*;
-    use axum::{
-        body::Body,
-        http::Request,
-    };
+    use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
     fn test_app() -> Router {
@@ -559,7 +578,9 @@ mod api_tests {
             .await
             .unwrap();
         assert_eq!(
-            res.headers().get("cache-control").and_then(|v| v.to_str().ok()),
+            res.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
             Some("no-store")
         );
     }

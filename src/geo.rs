@@ -42,16 +42,22 @@ pub struct GeoPool {
     asn_src: Option<String>,
 }
 
-fn open_first(dir: &Path, names: &[&str]) -> (Option<Reader<Vec<u8>>>, Option<String>) {
-    for name in names {
-        let path = dir.join(name);
-        if path.exists() {
-            match Reader::open_readfile(&path) {
-                Ok(r) => return (Some(r), Some(name.to_string())),
-                Err(e) => warn!("cannot open {}: {}", path.display(), e),
-            }
+fn try_open(path: &Path) -> Option<Reader<Vec<u8>>> {
+    match Reader::open_readfile(path) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            warn!("cannot open {}: {}", path.display(), e);
+            None
         }
     }
+}
+
+fn open_first(dir: &Path, names: &[&str]) -> (Option<Reader<Vec<u8>>>, Option<String>) {
+    let mut candidates: Vec<PathBuf> = names
+        .iter()
+        .map(|n| dir.join(n))
+        .filter(|p| p.exists())
+        .collect();
     // glob fallback: any matching file
     let pattern = if names[0].contains("City") || names[0].contains("city") {
         "city"
@@ -69,24 +75,20 @@ fn open_first(dir: &Path, names: &[&str]) -> (Option<Reader<Vec<u8>>>, Option<St
                         .and_then(|n| n.to_str())
                         .map(|n| n.to_ascii_lowercase().contains(pattern))
                         .unwrap_or(false)
+                    && !candidates.contains(p)
             })
             .collect();
         hits.sort();
-        for path in hits {
-            match Reader::open_readfile(&path) {
-                Ok(r) => {
-                    return (
-                        Some(r),
-                        Some(
-                            path.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("?")
-                                .to_string(),
-                        ),
-                    )
-                }
-                Err(e) => warn!("cannot open {}: {}", path.display(), e),
-            }
+        candidates.extend(hits);
+    }
+    for path in &candidates {
+        if let Some(r) = try_open(path) {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string();
+            return (Some(r), Some(name));
         }
     }
     (None, None)
@@ -200,95 +202,65 @@ fn is_empty_record(v: &Value) -> bool {
     }
 }
 
-fn get_str(v: &Value, paths: &[&[&str]]) -> Option<String> {
-    for path in paths {
+fn get_path<'a>(v: &'a Value, paths: &[&[&str]]) -> Option<&'a Value> {
+    paths.iter().find_map(|path| {
         let mut cur = v;
-        let mut ok = true;
         for key in *path {
-            match cur.get(*key) {
-                Some(next) => cur = next,
-                None => {
-                    ok = false;
-                    break;
-                }
-            }
+            cur = cur.get(*key)?;
         }
-        if ok {
-            if let Some(s) = cur.as_str() {
-                if !s.is_empty() {
-                    return Some(s.to_string());
-                }
-            }
-        }
-    }
-    None
+        Some(cur)
+    })
+}
+
+fn get_str(v: &Value, paths: &[&[&str]]) -> Option<String> {
+    get_path(v, paths)
+        .and_then(|c| c.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 fn get_f64(v: &Value, paths: &[&[&str]]) -> Option<f64> {
-    for path in paths {
+    paths.iter().find_map(|path| {
         let mut cur = v;
-        let mut ok = true;
         for key in *path {
-            match cur.get(*key) {
-                Some(next) => cur = next,
-                None => {
-                    ok = false;
-                    break;
-                }
-            }
+            cur = cur.get(*key)?;
         }
-        if ok {
-            if let Some(n) = cur.as_f64() {
-                return Some(n);
-            }
-            if let Some(n) = cur.as_i64() {
-                return Some(n as f64);
-            }
-        }
-    }
-    None
+        cur.as_f64().or_else(|| cur.as_i64().map(|n| n as f64))
+    })
 }
 
 fn get_u32(v: &Value, paths: &[&[&str]]) -> Option<u32> {
-    for path in paths {
+    paths.iter().find_map(|path| {
         let mut cur = v;
-        let mut ok = true;
         for key in *path {
-            match cur.get(*key) {
-                Some(next) => cur = next,
-                None => {
-                    ok = false;
-                    break;
-                }
+            cur = cur.get(*key)?;
+        }
+        if let Some(n) = cur.as_u64() {
+            if n <= u32::MAX as u64 {
+                return Some(n as u32);
             }
         }
-        if ok {
-            if let Some(n) = cur.as_u64() {
-                if n <= u32::MAX as u64 {
-                    return Some(n as u32);
-                }
-            }
-            if let Some(n) = cur.as_i64() {
-                if (0..=u32::MAX as i64).contains(&n) {
-                    return Some(n as u32);
-                }
+        if let Some(n) = cur.as_i64() {
+            if (0..=u32::MAX as i64).contains(&n) {
+                return Some(n as u32);
             }
         }
-    }
-    None
+        None
+    })
 }
 
 fn apply_city(v: &Value, out: &mut GeoInfo) {
     if out.country.is_none() {
-        out.country = get_str(
-            v,
-            &[&["country", "names", "en"], &["country"]],
-        );
+        out.country = get_str(v, &[&["country", "names", "en"], &["country"]]);
     }
     if out.country_code.is_none() {
         out.country_code = get_str(
             v,
-            &[&["country", "iso_code"], &["country_code"], &["countryCode"]],
+            &[
+                &["country", "iso_code"],
+                &["country_code"],
+                &["countryCode"],
+            ],
         );
     }
     if out.city.is_none() {
@@ -300,7 +272,12 @@ fn apply_city(v: &Value, out: &mut GeoInfo) {
     if out.longitude.is_none() {
         out.longitude = get_f64(
             v,
-            &[&["location", "longitude"], &["longitude"], &["lon"], &["lng"]],
+            &[
+                &["location", "longitude"],
+                &["longitude"],
+                &["lon"],
+                &["lng"],
+            ],
         );
     }
     // some ASN-combined DBs also carry org fields
@@ -371,7 +348,8 @@ mod tests {
 
     #[test]
     fn asn_record_variants() {
-        let v = json!({"autonomous_system_number": 9009, "autonomous_system_organization": "M-net"});
+        let v =
+            json!({"autonomous_system_number": 9009, "autonomous_system_organization": "M-net"});
         let mut out = GeoInfo::default();
         apply_asn(&v, &mut out);
         assert_eq!(out.asn, Some(9009));

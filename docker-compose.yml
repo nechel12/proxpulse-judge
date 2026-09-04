@@ -1,7 +1,7 @@
 services:
   judge:
     build: .
-    image: proxpulse-judge:0.5.1
+    image: proxpulse-judge:0.5.2
     container_name: proxpulse-judge
     restart: unless-stopped
     ports:
