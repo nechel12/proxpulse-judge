@@ -51,11 +51,15 @@ jobs:
 
       # Авто-редеплой своего Render-сервиса после свежей сборки.
       # Секретом владеет только владелец форка: в этом репо секрета нет
-      # и шаг скипается. Форкам: Render dashboard → service → Settings →
-      # Deploy Hook → скопировать URL в Secrets → RENDER_DEPLOY_HOOK,
-      # плюс включить Actions во вкладке Actions форка (по умолчанию
-      # выключены; шедула живёт только на default branch и отмирает
-      # после 60 дней без активности — см. README, вариант В).
+      # и шаг скипается. Нюанс синтаксиса: контекст secrets недоступен
+      # прямо в if, поэтому секрет сначала кладём в env шага.
+      # Форкам: Render dashboard → service → Settings → Deploy Hook →
+      # скопировать URL в Secrets → RENDER_DEPLOY_HOOK, плюс включить
+      # Actions во вкладке Actions форка (по умолчанию выключены; шедула
+      # живёт только на default branch и отмирает после 60 дней без
+      # активности — см. README, вариант В).
       - name: Trigger Render redeploy
-        if: ${{ secrets.RENDER_DEPLOY_HOOK != '' }}
-        run: curl -fsS "${{ secrets.RENDER_DEPLOY_HOOK }}"
+        if: ${{ env.RENDER_DEPLOY_HOOK != '' }}
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: curl -fsS "$RENDER_DEPLOY_HOOK"
