@@ -141,12 +141,12 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 Рабочий инстанс: **https://proxycheck.lmtunnel.com** — можно встраивать
 в чекер по умолчанию.
 
-Лимиты (считаются отдельно для каждого IP):
+Лимит один, на стороне приложения (считается отдельно для каждого IP,
+Cloudflare-правило для этого не нужно):
 
-| Уровень | Лимит | При превышении |
+| Область | Лимит | При превышении |
 |---|---|---|
-| Cloudflare | 500 запросов / 10 секунд | блок на 10 секунд (код 429) |
-| сам judge (`RATE_LIMIT_PER_MINUTE`, по умолчанию 6000, `0` — выкл) | N запросов / скользящую минуту | 429 + `Retry-After` |
+| все эндпоинты, кроме `/healthz` | `RATE_LIMIT_PER_MINUTE` запросов / скользящую минуту (по умолчанию 6000, `0` — выкл) | 429 + `Retry-After` |
 
 На практике: обычная проверка даже на сотнях потоков — это десятки
 запросов в секунду, проходит свободно. Лимиты режут только флуд и ботов.
@@ -184,12 +184,36 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 
 ### Базы сами обновляются? Нет
 
-`scripts/download-dbip.sh` — ручной: скачал → файлы легли в `./geo` →
-**перезапусти контейнер** (гео-кэш живёт в памяти, без рестарта новые
-файлы не подхватятся). Для автоматизации — cron раз в месяц + рестарт:
+`scripts/download-dbip.sh` (без ключей) или `scripts/download-geolite2.sh`
+(нужен `MAXMIND_LICENSE_KEY` из бесплатного аккаунта) — ручные: скачал →
+файлы легли в `./geo` → **перезапусти контейнер** (гео-кэш живёт в памяти,
+без рестарта новые файлы не подхватятся). Для автоматизации — cron
+раз в месяц + рестарт:
 
 ```cron
 0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
+```
+
+## Обслуживание: логи
+
+Логротейт **нужен**: сервис пишет логи в stdout, Docker складывает их
+в `json-file` без ограничения — без ротации съест весь диск.
+В `docker-compose.yml` уже стоят лимиты (`max-size: 10m`, `max-file: 3`,
+итого до ~30 МБ на контейнер) — для docker-сетапа этого достаточно,
+ничего делать не надо.
+
+Если запускаешь бинарь/прокси без Docker с логами в файл — пример
+для `/etc/logrotate.d/proxpulse-judge`:
+
+```
+/opt/proxpulse-judge/*.log /var/log/proxpulse-judge/*.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
 ```
 
 ## Конфигурация
@@ -222,7 +246,7 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 ## Разработка
 
 ```sh
-cargo test        # 26 тестов: логика, geo-парсинг, API (+CF-туннель)
+cargo test        # 33 теста: логика, geo-парсинг, API, лимиты
 cargo run         # PORT=8000 GEO_DIR=./geo TRUST_PROXY=0
 ```
 

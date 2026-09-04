@@ -27,7 +27,7 @@ use std::{
 use geo::{GeoInfo, GeoPool};
 use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
 
-const VERSION: &str = "0.5.0";
+const VERSION: &str = "0.5.1";
 
 /// Fixed-window-ish per-IP limiter: at most `per_minute` requests
 /// in any rolling 60s window. 0 disables. Pure function for testability:
@@ -189,6 +189,18 @@ async fn index(State(s): State<Arc<AppState>>) -> impl IntoResponse {
         "trust_proxy": s.trust_proxy,
         "trust_cf": s.trust_cf,
         "geo_sources": s.geo.sources(),
+        "licenses": {
+            "dbip_lite": {
+                "license": "CC BY 4.0",
+                "url": "https://db-ip.com/db/lite.php",
+                "attribution": "IP Geolocation by DB-IP (https://db-ip.com)",
+            },
+            "geolite2": {
+                "license": "GeoLite EULA (CC BY-SA 4.0 aspects)",
+                "url": "https://www.maxmind.com/en/geolite/eula",
+                "attribution": "This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com",
+            },
+        },
         "endpoints": [
             "GET /generate_204",
             "GET /ip",
@@ -550,6 +562,23 @@ mod api_tests {
             res.headers().get("cache-control").and_then(|v| v.to_str().ok()),
             Some("no-store")
         );
+    }
+
+    #[tokio::test]
+    async fn index_has_licenses() {
+        let res = test_app()
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["service"], "proxpulse-judge");
+        assert_eq!(v["licenses"]["dbip_lite"]["license"], "CC BY 4.0");
+        assert!(v["licenses"]["geolite2"]["url"]
+            .as_str()
+            .unwrap_or("")
+            .contains("maxmind.com"));
     }
 
     #[tokio::test]

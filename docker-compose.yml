@@ -1,7 +1,7 @@
 services:
   judge:
     build: .
-    image: proxpulse-judge:0.5.0
+    image: proxpulse-judge:0.5.1
     container_name: proxpulse-judge
     restart: unless-stopped
     ports:
@@ -10,6 +10,11 @@ services:
       - ./geo:/app/geo:ro
     env_file:
       - .env
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     ulimits:
       nofile:
         soft: 65535
