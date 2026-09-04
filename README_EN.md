@@ -1,6 +1,6 @@
 # ProxPulse Judge
 
-[![License](https://img.shields.io/github/license/nechel12/proxpulse-judge)](LICENSE)
+[![License](https://img.shields.io/github/license/nechel12/proxpulse-judge)](LICENSE) [![Last commit](https://img.shields.io/github/last-commit/nechel12/proxpulse-judge)](https://github.com/nechel12/proxpulse-judge/commits/main) ![Rust](https://img.shields.io/badge/backend-Rust-orange?logo=rust&logoColor=white)
 
 *([Русская версия](README.md))*
 
