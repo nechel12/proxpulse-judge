@@ -9,7 +9,7 @@ mod logic;
 
 use axum::{
     extract::{ConnectInfo, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -17,17 +17,88 @@ use axum::{
 use moka::sync::Cache;
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     env,
     net::SocketAddr,
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use geo::{GeoInfo, GeoPool};
 use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
 
-const VERSION: &str = "0.4.0";
+const VERSION: &str = "0.5.0";
+
+/// Fixed-window-ish per-IP limiter: at most `per_minute` requests
+/// in any rolling 60s window. 0 disables. Pure function for testability:
+/// returns Some(retry_after_secs) when over the limit.
+fn check_limit(
+    hits: &mut HashMap<String, VecDeque<Instant>>,
+    key: &str,
+    now: Instant,
+    limit: u32,
+) -> Option<u64> {
+    // occasional full sweep so spoofed keys can't grow the map forever
+    if hits.len() > 200_000 {
+        hits.retain(|_, q| {
+            while q.front().map(|t| now.duration_since(*t).as_secs() >= 60).unwrap_or(false) {
+                q.pop_front();
+            }
+            !q.is_empty()
+        });
+        if hits.len() > 200_000 {
+            return Some(60);
+        }
+    }
+    let q = hits.entry(key.to_string()).or_default();
+    while q.front().map(|t| now.duration_since(*t).as_secs() >= 60).unwrap_or(false) {
+        q.pop_front();
+    }
+    if q.len() as u32 >= limit {
+        let oldest = *q.front().unwrap();
+        return Some((60 - now.duration_since(oldest).as_secs() + 1).max(1));
+    }
+    q.push_back(now);
+    None
+}
+
+struct RateLimit {
+    per_minute: u32,
+    hits: Mutex<HashMap<String, VecDeque<Instant>>>,
+}
+
+async fn rate_limit_mw(
+    State(s): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> impl IntoResponse {
+    let path = req.uri().path().to_string();
+    if s.rate_limit.per_minute > 0 && path != "/healthz" && path != "/" {
+        let conn = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .cloned();
+        let key = self_ip(req.headers(), conn, s.trust_proxy, s.trust_cf);
+        let retry = {
+            let mut hits = s.rate_limit.hits.lock().unwrap();
+            check_limit(&mut hits, &key, Instant::now(), s.rate_limit.per_minute)
+        };
+        if let Some(secs) = retry {
+            let mut h = HeaderMap::new();
+            h.insert(
+                "retry-after",
+                HeaderValue::from_str(&secs.to_string()).unwrap(),
+            );
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                h,
+                Json(serde_json::json!({ "error": "rate limited" })),
+            )
+                .into_response();
+        }
+    }
+    next.run(req).await
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -35,6 +106,7 @@ struct AppState {
     geo_cache: Cache<String, GeoInfo>,
     ptr_cache: Cache<String, Option<String>>,
     rdns_sem: Arc<tokio::sync::Semaphore>,
+    rate_limit: Arc<RateLimit>,
     trust_proxy: bool,
     trust_cf: bool,
     rdns_timeout: Duration,
@@ -230,13 +302,22 @@ async fn judge(
         // (if any) was forwarded by the checked proxy
         for_analysis.insert("x-forwarded-for".to_string(), chain.join(", "));
     }
-    let level = anonymity_level(&for_analysis, p.direct_ip.as_deref());
+    let level = {
+        // garbage direct_ip is ignored instead of compared (a header value
+        // could otherwise "match" it and fake a transparent verdict)
+        let direct = p
+            .direct_ip
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty() && d.parse::<std::net::IpAddr>().is_ok());
+        anonymity_level(&for_analysis, direct)
+    };
 
     let g = geo_cached(&s, &me);
     let ptr = maybe_rdns(&s, &me, g.aso.as_deref()).await;
     let (t, signals) = classify_ip(g.aso.as_deref(), None, ptr.as_deref());
 
-    Json(serde_json::json!({
+    no_store_json(serde_json::json!({
         "ip": me,
         "headers": raw,
         "xff_chain": chain,
@@ -248,6 +329,12 @@ async fn judge(
         "content_version": logic::CONTENT_VERSION,
         "content_sha256": logic::content_sha256(),
     }))
+}
+
+fn no_store_json(v: serde_json::Value) -> impl IntoResponse {
+    let mut h = HeaderMap::new();
+    h.insert("cache-control", HeaderValue::from_static("no-store"));
+    (h, Json(v))
 }
 
 fn healthcheck(port: u16) -> bool {
@@ -299,6 +386,11 @@ async fn main() {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1.5),
     );
+    // requests per IP per rolling minute, 0 = off
+    let rate_per_minute: u32 = env::var("RATE_LIMIT_PER_MINUTE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6000);
 
     let state = Arc::new(AppState {
         geo: Arc::new(GeoPool::open(std::path::Path::new(&geo_dir))),
@@ -308,6 +400,10 @@ async fn main() {
             .time_to_live(Duration::from_secs(3600))
             .build(),
         rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
+        rate_limit: Arc::new(RateLimit {
+            per_minute: rate_per_minute,
+            hits: Mutex::new(HashMap::new()),
+        }),
         trust_proxy,
         trust_cf,
         rdns_timeout,
@@ -323,10 +419,14 @@ async fn main() {
         .route("/type", get(ip_type))
         .route("/content", get(content))
         .route("/judge", get(judge))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_mw,
+        ))
         .with_state(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-    tracing::info!("proxpulse-judge v{VERSION} on {addr} (trust_proxy={trust_proxy}, trust_cf={trust_cf})");
+    tracing::info!("proxpulse-judge v{VERSION} on {addr} (trust_proxy={trust_proxy}, trust_cf={trust_cf}, rate_per_minute={rate_per_minute})");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(
         listener,
@@ -347,11 +447,19 @@ mod api_tests {
     use tower::ServiceExt;
 
     fn test_app() -> Router {
+        test_app_with_limit(1_000_000)
+    }
+
+    fn test_app_with_limit(per_minute: u32) -> Router {
         let state = Arc::new(AppState {
             geo: Arc::new(GeoPool::open(std::path::Path::new("/nonexistent-dir-xyz"))),
             geo_cache: Cache::builder().max_capacity(1024).build(),
             ptr_cache: Cache::builder().max_capacity(1024).build(),
             rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
+            rate_limit: Arc::new(RateLimit {
+                per_minute,
+                hits: Mutex::new(HashMap::new()),
+            }),
             trust_proxy: true,
             trust_cf: true,
             rdns_timeout: Duration::from_millis(100),
@@ -363,7 +471,85 @@ mod api_tests {
             .route("/ip", get(ip))
             .route("/judge", get(judge))
             .route("/content", get(content))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                rate_limit_mw,
+            ))
             .with_state(state)
+    }
+
+    #[test]
+    fn limit_window_allows_then_blocks() {
+        let mut hits = HashMap::new();
+        let now = Instant::now();
+        assert_eq!(check_limit(&mut hits, "1.2.3.4", now, 2), None);
+        assert_eq!(check_limit(&mut hits, "1.2.3.4", now, 2), None);
+        let retry = check_limit(&mut hits, "1.2.3.4", now, 2);
+        assert!(retry.is_some() && retry.unwrap() >= 1 && retry.unwrap() <= 61);
+        // another IP has its own budget
+        assert_eq!(check_limit(&mut hits, "5.6.7.8", now, 2), None);
+    }
+
+    #[tokio::test]
+    async fn rate_limit_blocks_and_healthz_exempt() {
+        let app = test_app_with_limit(2);
+        let get_ip = || {
+            Request::get("/ip")
+                .header("x-forwarded-for", "9.9.9.9")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone().oneshot(get_ip()).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone().oneshot(get_ip()).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let limited = app.clone().oneshot(get_ip()).await.unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(limited.headers().contains_key("retry-after"));
+        // healthz never counts
+        for _ in 0..5 {
+            assert_eq!(
+                app.clone()
+                    .oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::OK
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn garbage_direct_ip_is_ignored() {
+        // user-agent "matches" the garbage direct_ip — must NOT fake transparent
+        let res = test_app()
+            .oneshot(
+                Request::get("/judge?direct_ip=not-an-ip")
+                    .header("user-agent", "not-an-ip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["anonymity"], "elite");
+    }
+
+    #[tokio::test]
+    async fn judge_sends_no_store() {
+        let res = test_app()
+            .oneshot(Request::get("/judge").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            res.headers().get("cache-control").and_then(|v| v.to_str().ok()),
+            Some("no-store")
+        );
     }
 
     #[tokio::test]
@@ -467,6 +653,10 @@ mod api_tests {
             geo_cache: Cache::builder().max_capacity(16).build(),
             ptr_cache: Cache::builder().max_capacity(16).build(),
             rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
+            rate_limit: Arc::new(RateLimit {
+                per_minute: 1_000_000,
+                hits: Mutex::new(HashMap::new()),
+            }),
             trust_proxy: true,
             trust_cf: true,
             rdns_timeout: Duration::from_millis(50),
