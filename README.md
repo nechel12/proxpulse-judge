@@ -1,5 +1,7 @@
 # ProxPulse Judge
 
+[![License](https://img.shields.io/github/license/nechel12/proxpulse-judge)](LICENSE)
+
 *([English version](README_EN.md))*
 
 Self-hosted backend для проверки прокси. Один запрос `GET /judge` заменяет
@@ -11,6 +13,9 @@ Self-hosted backend для проверки прокси. Один запрос 
 API, никаких лимитов, один бинарь без рантайма в `debian:slim`.
 
 ## Быстрый старт
+
+Нужны [Docker](https://docs.docker.com/get-docker/) с Compose и `bash`
+(скрипт скачивания баз). Для разработки без Docker — [Rust](https://rustup.rs/).
 
 ```sh
 git clone https://github.com/nechel12/proxpulse-judge.git
@@ -253,3 +258,17 @@ cargo run         # PORT=8000 GEO_DIR=./geo TRUST_PROXY=0
 
 Структура: `src/main.rs` (HTTP), `src/geo.rs` (пул `.mmdb` + LRU),
 `src/logic.rs` (анонимность, тип IP, фикс-контент).
+
+## Связанные проекты
+
+- [proxpulse](https://github.com/nechel12/proxpulse) — десктопный чекер
+  прокси (Tauri 2), использует judge как backend для проверок; публичный
+  инстанс выше встроен в него по умолчанию.
+
+## Как помочь
+
+Баг-репорты и PR приветствуются. Перед отправкой прогони `cargo test`.
+
+## Лицензия
+
+Apache-2.0, см. [LICENSE](LICENSE).

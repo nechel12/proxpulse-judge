@@ -1,5 +1,7 @@
 # ProxPulse Judge
 
+[![License](https://img.shields.io/github/license/nechel12/proxpulse-judge)](LICENSE)
+
 *([Русская версия](README.md))*
 
 Self-hosted backend for proxy checking. A single `GET /judge` request replaces
@@ -11,6 +13,9 @@ Stack: **Rust + axum + tokio**, databases in RAM, lookup LRU cache. No external
 APIs, no limits, a single runtime-free binary in `debian:slim`.
 
 ## Quickstart
+
+Requires [Docker](https://docs.docker.com/get-docker/) with Compose and `bash`
+(the database download script). For Docker-free development — [Rust](https://rustup.rs/).
 
 ```sh
 git clone https://github.com/nechel12/proxpulse-judge.git
@@ -254,3 +259,17 @@ cargo run         # PORT=8000 GEO_DIR=./geo TRUST_PROXY=0
 
 Structure: `src/main.rs` (HTTP), `src/geo.rs` (`.mmdb` pool + LRU),
 `src/logic.rs` (anonymity, IP type, fixed content).
+
+## Related projects
+
+- [proxpulse](https://github.com/nechel12/proxpulse) — desktop proxy
+  checker (Tauri 2) that uses the judge as its check backend; the public
+  instance above is embedded in it by default.
+
+## Contributing
+
+Bug reports and PRs are welcome. Before sending, run `cargo test`.
+
+## License
+
+Apache-2.0, see [LICENSE](LICENSE).
