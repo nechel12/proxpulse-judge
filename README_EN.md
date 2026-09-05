@@ -190,23 +190,22 @@ Example `/judge` response:
    for an hour.
 5. A liveness check is just `GET /generate_204` (empty 204, the cheapest request).
 
-## Public instance
+## Public instances
 
-Live instance: **https://proxycheck.lmtunnel.com** — can be embedded
-in the checker by default.
+The primary instance — **https://proxycheck.lmtunnel.com**: enabled
+in the checker by default. Limit — 1000 requests per minute per IP
+(429 + `Retry-After` on exceed).
 
-Limits are counted separately per IP:
+The fallback instance — **https://proxpulse-judge.onrender.com**
+(free Render hosting, DB-IP Lite databases, image refreshed monthly).
+Free-plan notes: the service sleeps after 15 minutes without traffic
+(waking up takes about a minute) and is limited to roughly 750 hours
+per month — it may be unavailable near the end of the month until the
+quota resets. For regular checks use the primary instance or host
+your own (variants A–C above).
 
-| Scope | Limit | On exceed |
-|---|---|---|
-| all endpoints except `/healthz` | `RATE_LIMIT_PER_MINUTE` requests / sliding minute (default 6000, `0` — off) | 429 + `Retry-After` |
-
-In practice: an ordinary check even on hundreds of threads is tens of
-requests per second, passes freely. Limits only cut floods and bots.
-`/healthz` is never limited.
-
-Please keep load reasonable: reverse-DNS is done by the server itself and
-only for unknown ASN orgs, no client-side requests needed — just don't flood.
+Please keep load reasonable: reverse-DNS is done by the server itself
+and only for unknown ASN orgs, no client-side requests needed.
 
 ## Databases
 

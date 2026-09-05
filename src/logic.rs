@@ -137,7 +137,13 @@ fn is_infra(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
     // Cloudflare edge headers: CF-Connecting-IP always equals the exit IP
     // by construction, so it must never count as a leak or a telltale.
-    INFRA_HEADERS.contains(&n.as_str()) || n.starts_with("cf-") || n == "cdn-loop"
+    // Same for True-Client-IP: Render's Cloudflare config sends it on
+    // every request with the same value (seen live), and a direct check
+    // would otherwise misdetect as transparent.
+    INFRA_HEADERS.contains(&n.as_str())
+        || n.starts_with("cf-")
+        || n == "cdn-loop"
+        || n == "true-client-ip"
 }
 
 fn is_telltale(name: &str) -> bool {
@@ -491,6 +497,20 @@ mod tests {
         for_analysis.insert("x-forwarded-for".to_string(), chain.join(", "));
         assert_eq!(anonymity_level(&for_analysis, Some("1.1.1.1")), "elite");
         assert_eq!(anonymity_level(&for_analysis, None), "elite");
+    }
+
+    #[test]
+    fn render_true_client_ip_is_not_a_leak() {
+        // Live Render headers: True-Client-IP duplicates the exit IP on
+        // every request. In a direct check direct_ip == exit IP, so without
+        // the exclusion this misdetects as transparent.
+        let h = map(&[
+            ("cf-connecting-ip", "1.1.1.1"),
+            ("true-client-ip", "1.1.1.1"),
+            ("cf-ray", "abc123"),
+            ("x-forwarded-for", ""),
+        ]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "elite");
     }
 
     #[test]
