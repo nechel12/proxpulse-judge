@@ -111,44 +111,45 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 
 A ready image with embedded DB-IP Lite rebuilds itself every month
 (`.github/workflows/docker.yml` → `ghcr.io/nechel12/proxpulse-judge:latest`),
-no disk needed. Hit the button — Render spins up the service from
-`render.yaml` and hands you a free `https://<name>.onrender.com`. Put
-that URL into the checker. No Cloudflare Tunnel here: Render itself
-provides TLS and the domain.
+no disk needed. The button creates the service from `render.yaml` with
+a free `https://<name>.onrender.com` domain. Use the resulting URL in
+the checker. No Cloudflare Tunnel is needed in this setup: Render
+provides both TLS and the domain.
 
 Free-plan notes:
 
-- The service sleeps after 15 minutes without traffic and wakes up in
+- The service sleeps after 15 minutes without traffic; waking up takes
   about a minute. The first check after idle may partially fail on
-  timeouts — just repeat it. One service barely fits into the free
-  750 h/month.
+  timeouts — repeating it is sufficient. A single service approximately
+  matches the free 750 h/month allowance.
 - The filesystem is ephemeral, but that is fine: the databases are
   baked into the image.
-- `TRUST_CF=1` is required (Render sits behind Cloudflare, the real IP
-  comes from `CF-Connecting-IP`) — already set in `render.yaml`, keep it.
-  Never set `PORT` — Render injects it.
+- `TRUST_CF=1` is required (Render traffic passes through Cloudflare;
+  the real IP is taken from `CF-Connecting-IP`) — it is already set in
+  `render.yaml`. The `PORT` variable is provided by Render and must not
+  be overridden.
 - The image carries DB-IP Lite only: MaxMind forbids redistribution in
-  a public image. Want MaxMind — use the VPS + volume variant above.
+  a public image. For MaxMind, use the VPS + volume variant above.
 
 Database updates (the image rebuilds on the 3rd of every month):
 
-1. **Fork + auto-hook.** Fork the repo, enable workflows in the fork's
-   Actions tab (disabled by default), add a `RENDER_DEPLOY_HOOK` secret
-   (Render dashboard → your service → Settings → Deploy Hook), and point
+1. **Fork + auto-hook.** Fork the repository, enable workflows in the
+   fork's Actions tab (disabled by default), add a `RENDER_DEPLOY_HOOK`
+   secret (Render dashboard → service → Settings → Deploy Hook), and point
    the fork's `render.yaml` at your own
-   `ghcr.io/<you>/proxpulse-judge:latest`. Fresh images then flow into
-   your GHCR and trigger redeploys by themselves. Caveat: the schedule
-   goes dormant after 60 days without activity in the fork — poke it
-   manually sometimes (the workflow has Run workflow).
+   `ghcr.io/<owner>/proxpulse-judge:latest`. Fresh images are then published
+   to the fork's GHCR and trigger redeploys automatically. Limitation: the
+   schedule is disabled after 60 days without activity in the fork — run
+   the workflow manually from time to time (Run workflow).
 2. **Manually.** Render dashboard → service → Manual Deploy →
-   Deploy latest reference. Geo drifts slowly — enough for most.
-3. **Your own cron, no fork.** The service can track
+   Deploy latest reference. Geo data changes slowly, so manual updates
+   are usually sufficient.
+3. **Own scheduler, no fork.** The service can track
    `ghcr.io/nechel12/proxpulse-judge:latest` directly while any external
-   cron (your server, cron-job.org, etc.) hits your deploy hook monthly.
+   scheduler (own server, cron-job.org, etc.) calls the deploy hook monthly.
 
-The same image fits other container hostings too: all they need is
-`$PORT` passthrough and `/healthz` as the health check. Running it
-somewhere else — extend this section.
+The image is compatible with other container hostings: `$PORT`
+passthrough and `/healthz` as the health check are required.
 
 ## Endpoints
 
@@ -247,9 +248,9 @@ monthly cron + restart:
 0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
 ```
 
-If `./geo` has no `.mmdb` at all (forgot to download), the container
-entrypoint fetches DB-IP Lite itself on startup. Your own files
-(MaxMind or DB-IP) always win — the fallback only fires on an empty
+If the `./geo` directory contains no `.mmdb` files, the container
+entrypoint downloads DB-IP Lite automatically on startup. Custom files
+(MaxMind or DB-IP) take precedence — the fallback only fires on an empty
 directory.
 
 ## Maintenance: logs
