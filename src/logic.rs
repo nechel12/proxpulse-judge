@@ -88,22 +88,44 @@ pub fn client_ip(
 }
 
 /// XFF entries added BEFORE our reverse proxy (i.e. by the checked proxy).
-/// Our edge always appends its own downstream last: normally that is the
-/// client itself (Caddy/nginx write the connecting IP, which is also what
-/// [`client_ip`] resolves) and the pop below removes it. But when an outer
-/// CDN sits in front of our edge (Cloudflare in front of Render: CF writes
-/// the client, Render appends the CDN egress IP), the last entry is
-/// infrastructure, not the client — drop it first, then the usual pop
-/// removes the client entry the CDN wrote. Without CF in the path the last
-/// entry always equals the client, so the first pop never fires and the
-/// Caddy/VPS behaviour is unchanged.
-pub fn forwarded_chain(xff: Option<&str>, client: &str, trust_proxy: bool) -> Vec<String> {
-    if !trust_proxy {
-        return split_xff(xff).into_iter().map(|e| clean_host(&e)).collect();
-    }
+///
+/// How our edge appends determines the cleanup:
+/// - direct edge (Caddy/nginx): appends the client itself, which is also
+///   what [`client_ip`] resolves — pop that single trailing entry;
+/// - CDN in front of the edge (Cloudflare in front of Render, or in front
+///   of Caddy): the CDN writes the client and the hops below it append
+///   their own addresses after it (live Render shape:
+///   `[client, CF-egress, inner-LB]`), so everything from the first client
+///   entry onward is our infrastructure — truncate there. The CDN branch
+///   only fires when the client was actually resolved from a valid
+///   `CF-Connecting-IP`, otherwise the legacy single pop applies and the
+///   Caddy/VPS behaviour is unchanged.
+pub fn forwarded_chain(
+    xff: Option<&str>,
+    client: &str,
+    trust_proxy: bool,
+    trust_cf: bool,
+    cf_ip: Option<&str>,
+) -> Vec<String> {
     let mut chain: Vec<String> = split_xff(xff).into_iter().map(|e| clean_host(&e)).collect();
-    if chain.last().map(|s| s.as_str()) != Some(client) {
-        chain.pop();
+    if !trust_proxy {
+        return chain;
+    }
+    // CDN branch: same condition as the CF priority in [`client_ip`]; the
+    // equality guard keeps this fail-closed if a caller ever passes an
+    // inconsistent client.
+    let cdn_client = if trust_cf {
+        cf_ip
+            .map(|c| clean_host(c))
+            .filter(|c| c.parse::<std::net::IpAddr>().is_ok())
+    } else {
+        None
+    };
+    if cdn_client.as_deref() == Some(client) {
+        if let Some(pos) = chain.iter().position(|e| e == client) {
+            chain.truncate(pos);
+        }
+        return chain;
     }
     if chain.last().map(|s| s.as_str()) == Some(client) {
         chain.pop();
@@ -386,45 +408,89 @@ mod tests {
     #[test]
     fn chain_strips_caddy_entry() {
         assert_eq!(
-            forwarded_chain(Some("1.2.3.4, 5.6.7.8"), "5.6.7.8", true),
+            forwarded_chain(Some("1.2.3.4, 5.6.7.8"), "5.6.7.8", true, false, None),
             vec!["1.2.3.4"]
         );
-        assert!(forwarded_chain(Some("5.6.7.8"), "5.6.7.8", true).is_empty());
+        assert!(forwarded_chain(Some("5.6.7.8"), "5.6.7.8", true, false, None).is_empty());
         assert_eq!(
-            forwarded_chain(Some("1.2.3.4"), "9.9.9.9", false),
+            forwarded_chain(Some("1.2.3.4"), "9.9.9.9", false, false, None),
             vec!["1.2.3.4"]
         );
     }
 
     #[test]
-    fn chain_strips_render_cdn_egress() {
-        // Render shape: CF wrote the client, Render appended the CDN
-        // egress IP last — both must go, the rest is the checked proxy.
-        // Direct check: client 1.2.3.4, CDN egress 5.6.7.8.
-        assert!(forwarded_chain(Some("1.2.3.4, 5.6.7.8"), "1.2.3.4", true).is_empty());
-        // Elite proxy: exit 9.9.9.9, CDN egress 5.6.7.8.
-        assert!(forwarded_chain(Some("9.9.9.9, 5.6.7.8"), "9.9.9.9", true).is_empty());
-        // Transparent proxy: leaked 1.2.3.4 survives, infra does not.
+    fn chain_strips_cdn_infra_hops() {
+        // Live Render shape: CF wrote the client, then CF-egress and the
+        // inner LB appended their hops. All infra must go, whatever leaked
+        // before it must stay.
+        // Direct check.
+        assert!(forwarded_chain(
+            Some("1.2.3.4, 172.71.146.141, 10.29.121.232"),
+            "1.2.3.4",
+            true,
+            true,
+            Some("1.2.3.4"),
+        )
+        .is_empty());
+        // Elite proxy: only its exit IP precedes the infra hops.
+        assert!(forwarded_chain(
+            Some("9.9.9.9, 172.71.146.141, 10.29.121.232"),
+            "9.9.9.9",
+            true,
+            true,
+            Some("9.9.9.9"),
+        )
+        .is_empty());
+        // Transparent proxy: the leaked IP survives, infra does not.
         assert_eq!(
-            forwarded_chain(Some("1.2.3.4, 9.9.9.9, 5.6.7.8"), "9.9.9.9", true),
+            forwarded_chain(
+                Some("1.2.3.4, 9.9.9.9, 172.71.146.141, 10.29.121.232"),
+                "9.9.9.9",
+                true,
+                true,
+                Some("9.9.9.9"),
+            ),
             vec!["1.2.3.4"]
+        );
+        // Single-hop CDN shape strips as well.
+        assert!(forwarded_chain(
+            Some("9.9.9.9, 5.6.7.8"),
+            "9.9.9.9",
+            true,
+            true,
+            Some("9.9.9.9"),
+        )
+        .is_empty());
+        // Inconsistent caller input (client not from CF header):
+        // fail closed, legacy single pop applies.
+        assert_eq!(
+            forwarded_chain(Some("9.9.9.9"), "1.1.1.1", true, true, Some("9.9.9.9")),
+            vec!["9.9.9.9"]
         );
     }
 
     #[test]
     fn render_direct_check_is_elite_not_transparent() {
-        // Full Render-shaped request: CF-Connecting-IP is the client,
-        // XFF carries [client, CDN-egress]. Must be elite, not transparent.
+        // Full live Render-shaped request: CF-Connecting-IP is the client,
+        // XFF carries [client, CF-egress, inner-LB]. Must be elite,
+        // not transparent — with the real direct_ip and without it.
         let h = map(&[
             ("cf-connecting-ip", "1.1.1.1"),
             ("cf-ray", "abc123"),
-            ("x-forwarded-for", "1.1.1.1, 5.6.7.8"),
+            ("x-forwarded-for", "1.1.1.1, 172.71.146.141, 10.29.121.232"),
         ]);
-        let chain = forwarded_chain(h.get("x-forwarded-for").map(|s| s.as_str()), "1.1.1.1", true);
+        let chain = forwarded_chain(
+            h.get("x-forwarded-for").map(|s| s.as_str()),
+            "1.1.1.1",
+            true,
+            true,
+            h.get("cf-connecting-ip").map(|s| s.as_str()),
+        );
         assert!(chain.is_empty());
         let mut for_analysis = h.clone();
         for_analysis.insert("x-forwarded-for".to_string(), chain.join(", "));
         assert_eq!(anonymity_level(&for_analysis, Some("1.1.1.1")), "elite");
+        assert_eq!(anonymity_level(&for_analysis, None), "elite");
     }
 
     #[test]
@@ -534,7 +600,7 @@ mod tests {
             "5.6.7.8"
         );
         assert_eq!(
-            forwarded_chain(Some("1.2.3.4:40000, 5.6.7.8"), "5.6.7.8", true),
+            forwarded_chain(Some("1.2.3.4:40000, 5.6.7.8"), "5.6.7.8", true, false, None),
             vec!["1.2.3.4".to_string()]
         );
     }

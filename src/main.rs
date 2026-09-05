@@ -244,6 +244,8 @@ async fn headers_echo(
         raw.get("x-forwarded-for").map(|x| x.as_str()),
         &me,
         s.trust_proxy,
+        s.trust_cf,
+        raw.get("cf-connecting-ip").map(|x| x.as_str()),
     );
     let mut visible = raw;
     if s.trust_proxy && visible.contains_key("x-forwarded-for") {
@@ -309,11 +311,13 @@ async fn judge(
         raw.get("x-forwarded-for").map(|x| x.as_str()),
         &me,
         s.trust_proxy,
+        s.trust_cf,
+        raw.get("cf-connecting-ip").map(|x| x.as_str()),
     );
 
     let mut for_analysis = raw.clone();
     if s.trust_proxy && for_analysis.contains_key("x-forwarded-for") {
-        // our reverse proxy appended `me` last — remove it, the rest
+        // strip our edge's own additions (see forwarded_chain): the rest
         // (if any) was forwarded by the checked proxy
         for_analysis.insert("x-forwarded-for".to_string(), chain.join(", "));
     }
