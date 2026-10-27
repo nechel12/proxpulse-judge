@@ -1,6 +1,6 @@
-//! Local .mmdb pool: GeoLite2 / DB-IP Lite, read fully into RAM,
-//! LRU-cached lookups. Records are decoded flexibly (multiple key
-//! spellings) so both MaxMind and DB-IP files work.
+//! Local .mmdb pool: GeoLite2 / DB-IP Lite, read fully into RAM.
+//! Records are decoded flexibly (multiple key spellings) so both
+//! MaxMind and DB-IP files work.
 use maxminddb::Reader;
 use serde::Serialize;
 use serde_json::Value;
@@ -31,6 +31,18 @@ pub struct GeoInfo {
     pub asn: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aso: Option<String>,
+}
+
+impl GeoInfo {
+    fn has_any_field(&self) -> bool {
+        self.country.is_some()
+            || self.country_code.is_some()
+            || self.city.is_some()
+            || self.latitude.is_some()
+            || self.longitude.is_some()
+            || self.asn.is_some()
+            || self.aso.is_some()
+    }
 }
 
 pub struct GeoPool {
@@ -131,9 +143,33 @@ impl GeoPool {
         &self.sources
     }
 
+    /// Required attribution notices for the loaded databases (inspects both
+    /// filenames and MMDB `database_type` metadata).
+    pub fn attributions(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        let mut labels: Vec<String> = self
+            .sources
+            .values()
+            .map(|s| s.to_ascii_lowercase())
+            .collect();
+        for reader in [&self.city, &self.country, &self.asn].into_iter().flatten() {
+            labels.push(reader.metadata().database_type.to_ascii_lowercase());
+        }
+        for name in labels {
+            if name.contains("maxmind") || name.contains("geolite") || name.contains("geoip") {
+                out.push("This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com");
+            } else if name.contains("dbip") || name.contains("db-ip") {
+                out.push("IP Geolocation by DB-IP (https://db-ip.com)");
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     pub fn lookup(&self, ip: &str) -> GeoInfo {
-        let addr: IpAddr = match ip.parse() {
-            Ok(a) => a,
+        let addr: IpAddr = match ip.parse::<IpAddr>() {
+            Ok(a) => a.to_canonical(),
             Err(_) => {
                 return GeoInfo {
                     ip: ip.to_string(),
@@ -146,23 +182,20 @@ impl GeoPool {
             ip: ip.to_string(),
             ..Default::default()
         };
-        let mut found = false;
         if let Some(reader) = &self.city {
             match lookup_value(reader, addr) {
                 Ok(Some(v)) if !is_empty_record(&v) => {
                     apply_city(&v, &mut out);
-                    found = true;
                 }
                 Ok(_) => {}
                 Err(e) => out.error = Some(format!("city: {}", short_err(&e.to_string()))),
             }
         }
-        if !found {
+        if out.country.is_none() && out.country_code.is_none() {
             if let Some(reader) = &self.country {
                 match lookup_value(reader, addr) {
                     Ok(Some(v)) if !is_empty_record(&v) => {
                         apply_city(&v, &mut out);
-                        found = true;
                     }
                     Ok(_) => {}
                     Err(e) => out.error = Some(format!("country: {}", short_err(&e.to_string()))),
@@ -173,12 +206,12 @@ impl GeoPool {
             match lookup_value(reader, addr) {
                 Ok(Some(v)) if !is_empty_record(&v) => {
                     apply_asn(&v, &mut out);
-                    found = true;
                 }
                 Ok(_) => {}
                 Err(e) => out.error = Some(format!("asn: {}", short_err(&e.to_string()))),
             }
         }
+        let found = out.has_any_field();
         if found {
             // A failed city/country reader must not poison a response that
             // was successfully filled from another source.

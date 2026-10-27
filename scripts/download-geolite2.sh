@@ -26,12 +26,14 @@ CURL=(
 for EDITION in GeoLite2-City GeoLite2-ASN GeoLite2-Country; do
   echo "== $EDITION"
   TAR="$TMP/${EDITION}.tar.gz"
-  "${CURL[@]}" -o "$TAR" \
-    "https://download.maxmind.com/app/geoip_download?edition_id=${EDITION}&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz"
+  # Pass the URL via stdin config so MAXMIND_LICENSE_KEY does not appear in ps/cmdline.
+  "${CURL[@]}" -o "$TAR" --config - <<EOF
+url = "https://download.maxmind.com/app/geoip_download?edition_id=${EDITION}&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz"
+EOF
   mkdir -p "$TMP/${EDITION}"
   # Extract into a temp dir first; no --wildcards (portable, and a
   # truncated tar cannot clobber the mmdb that the service is using).
-  tar -xzf "$TAR" -C "$TMP/${EDITION}" --strip-components=1
+  tar -xzf "$TAR" -C "$TMP/${EDITION}" --strip-components=1 --no-same-owner
   test -s "$TMP/${EDITION}/${EDITION}.mmdb" || {
     echo "error: ${EDITION}.mmdb missing or empty in archive" >&2
     exit 1

@@ -33,7 +33,9 @@ release is a short manual sequence.
      Cloudflare Tunnel or Render uses `TRUST_CF=1` with `TRUST_PROXY=1`.
    - Caddy needs the `trusted_proxies` configuration from
      `Caddyfile.example`; a Cloudflare-in-front-of-Caddy setup needs CF ranges
-     instead of `0.0.0.0/0`.
+     instead of `0.0.0.0/0` plus origin firewalling (or Authenticated Origin
+     Pulls) on ports 80/443 so clients cannot bypass Cloudflare and spoof
+     `CF-Connecting-IP`.
    - Render: deploy the new image reference and keep `TRUST_CF=1`.
    - Run `scripts/smoke.sh https://your-instance.example` against the live
      service.

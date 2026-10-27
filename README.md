@@ -85,7 +85,9 @@ through Caddy. Keep `TRUST_CF=0` (the default) for this variant: there is no
 Cloudflare here, and CF headers are trivially forgeable.
 
 If Cloudflare sits **in front of** Caddy, do not strip the CF headers: set
-`trusted_proxies` to Cloudflare's ranges instead of `0.0.0.0/0`, keep
+`trusted_proxies` to Cloudflare's ranges instead of `0.0.0.0/0`, restrict
+ports 80/443 to Cloudflare IPs (or use Authenticated Origin Pulls, since
+`trusted_proxies` only governs `X-Forwarded-*`, not `CF-Connecting-IP`), keep
 `TRUST_CF=1`, and make sure `TRUST_PROXY=1`.
 
 ## Variant B — Cloudflare Tunnel (no Caddy, no open ports)
@@ -137,7 +139,7 @@ Set `TRUST_CF=1` explicitly in this variant and keep `TRUST_PROXY=1`;
 `TRUST_CF` defaults to `0`, which is safe for Caddy/VPS. The service takes
 the real IP from `CF-Connecting-IP` (set by Cloudflare itself, takes
 priority over `X-Forwarded-For`), and all
-`cf-*`/`cdn-loop` headers are excluded from anonymity detection — otherwise a
+`cf-*`/`cdn-loop`/`true-client-ip` headers are excluded from anonymity detection — otherwise a
 direct check through the tunnel would give a false `transparent`. Check:
 
 ```sh
@@ -380,14 +382,14 @@ IP/geo and the rate-limit key.
 ## Development
 
 ```sh
-cargo test        # 50 tests: logic, geo parsing, API, limits
+cargo test        # 56 tests: logic, geo parsing, API, limits
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
 
 scripts/smoke.sh http://127.0.0.1:8000
 scripts/load.sh http://127.0.0.1:8000 300 32
 ```
 
-Structure: `src/main.rs` (HTTP), `src/geo.rs` (`.mmdb` pool + cache),
+Structure: `src/main.rs` (HTTP + caches), `src/geo.rs` (`.mmdb` pool),
 `src/logic.rs` (anonymity, IP type, fixed content).
 
 ## Related projects

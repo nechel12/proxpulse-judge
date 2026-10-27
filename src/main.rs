@@ -28,7 +28,9 @@ use std::{
 };
 
 use geo::{GeoInfo, GeoPool};
-use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
+use logic::{
+    anonymity_level, classify_ip, client_ip, forwarded_chain, normalize_host, pre_edge_xff,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPOSITORY: &str = "https://github.com/nechel12/proxpulse-judge";
@@ -207,10 +209,10 @@ struct JudgeParams {
 fn joined_header(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut values = headers.get_all(name).iter();
     let first = values.next()?;
-    let mut out = first.to_str().unwrap_or("").to_string();
+    let mut out = String::from_utf8_lossy(first.as_bytes()).into_owned();
     for v in values {
         out.push_str(", ");
-        out.push_str(v.to_str().unwrap_or(""));
+        out.push_str(&String::from_utf8_lossy(v.as_bytes()));
     }
     Some(out)
 }
@@ -262,15 +264,49 @@ fn parse_rdns_timeout(raw: Option<&str>) -> Duration {
         .unwrap_or(Duration::from_secs_f64(1.5))
 }
 
+fn is_public_ip(addr: std::net::IpAddr) -> bool {
+    match addr.to_canonical() {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            let is_cgnat = octets[0] == 100 && (octets[1] & 0b1100_0000) == 64;
+            let is_benchmark = octets[0] == 198 && (octets[1] == 18 || octets[1] == 19);
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || is_cgnat
+                || is_benchmark)
+        }
+        std::net::IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            let is_doc = segs[0] == 0x2001 && segs[1] == 0x0db8;
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+                || is_doc)
+        }
+    }
+}
+
 /// Server-side rDNS policy: resolve only when the ASN org is missing
-/// (otherwise PTR adds nothing worth a DNS round-trip), at most
-/// RDNS_MAX_CONCURRENT resolutions at once, results cached for an hour.
-/// The client cannot request rDNS — there is no such parameter.
+/// (otherwise PTR adds nothing worth a DNS round-trip), only for public
+/// unicast IPs, at most RDNS_MAX_CONCURRENT resolutions at once, results
+/// cached for an hour. The client cannot request rDNS — there is no such
+/// parameter.
 async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<String> {
-    if aso.map(|o| !o.trim().is_empty()).unwrap_or(false) {
+    if state.rdns_timeout.is_zero() || aso.map(|o| !o.trim().is_empty()).unwrap_or(false) {
         return None;
     }
-    let key = ip.to_string();
+    let addr = ip.parse::<std::net::IpAddr>().ok()?.to_canonical();
+    if !is_public_ip(addr) {
+        return None;
+    }
+    let key = addr.to_string();
     if let Some(hit) = state.ptr_cache.get(&key) {
         return hit;
     }
@@ -290,18 +326,18 @@ async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<Str
             return None;
         }
     };
+    if let Some(hit) = state.ptr_cache.get(&key) {
+        return hit;
+    }
     state.metrics.rdns_lookups.fetch_add(1, Ordering::Relaxed);
     let cache = state.ptr_cache.clone();
     let key_for_task = key.clone();
     let fut = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let res = key_for_task
-            .parse::<std::net::IpAddr>()
-            .ok()
-            .and_then(|addr| dns_lookup::lookup_addr(&addr).ok());
+        let res = dns_lookup::lookup_addr(&addr).ok();
         // Cache the eventual answer even if the request timed out: the
         // next request should not repeat a slow/absent lookup.
-        cache.insert(key_for_task.clone(), res.clone());
+        cache.insert(key_for_task, res.clone());
         res
     });
     match tokio::time::timeout(state.rdns_timeout, fut).await {
@@ -477,18 +513,7 @@ fn sources_or_null(s: &AppState) -> serde_json::Value {
 /// Required attribution for the DB actually loaded (DB-IP CC BY 4.0 /
 /// MaxMind GeoLite2 EULA), so API consumers can show it with geo results.
 fn attribution(s: &AppState) -> Vec<&'static str> {
-    let mut out = Vec::new();
-    for src in s.geo.sources().values() {
-        let name = src.to_ascii_lowercase();
-        if name.contains("maxmind") || name.contains("geolite") {
-            out.push("This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com");
-        } else if name.contains("dbip") {
-            out.push("IP Geolocation by DB-IP (https://db-ip.com)");
-        }
-    }
-    out.sort_unstable();
-    out.dedup();
-    out
+    s.geo.attributions()
 }
 
 async fn ip_type(
@@ -530,18 +555,26 @@ async fn judge(
     if s.trust_proxy && for_analysis.contains_key("x-forwarded-for") {
         // strip our edge's own additions (see forwarded_chain): the rest
         // (if any) was forwarded by the checked proxy
-        for_analysis.insert("x-forwarded-for".to_string(), chain.join(", "));
+        let raw_pre_edge = pre_edge_xff(
+            raw.get("x-forwarded-for").map(|x| x.as_str()),
+            &me,
+            s.trust_proxy,
+            s.trust_cf,
+            raw.get("cf-connecting-ip").map(|x| x.as_str()),
+        );
+        let stripped = if !chain.is_empty() {
+            chain.join(", ")
+        } else if !raw_pre_edge.is_empty() {
+            "unknown".to_string()
+        } else {
+            String::new()
+        };
+        for_analysis.insert("x-forwarded-for".to_string(), stripped);
     }
     let level = {
         // garbage direct_ip is ignored instead of compared (a header value
         // could otherwise "match" it and fake a transparent verdict)
-        let direct = p
-            .direct_ip
-            .as_deref()
-            .map(str::trim)
-            .filter(|d| !d.is_empty())
-            .and_then(|d| d.parse::<std::net::IpAddr>().ok())
-            .map(|ip| ip.to_string());
+        let direct = p.direct_ip.as_deref().and_then(normalize_host);
         anonymity_level(&for_analysis, direct.as_deref(), s.trust_cf)
     };
 
@@ -667,6 +700,37 @@ async fn shutdown_signal() {
     }
 }
 
+fn build_app(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/", get(index))
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics_ep))
+        .route("/generate_204", get(generate_204))
+        .route("/ip", get(ip))
+        .route("/headers", get(headers_echo))
+        .route("/geo", get(geo_ep))
+        .route("/type", get(ip_type))
+        .route("/content", get(content))
+        .route("/judge", get(judge))
+        .layer(axum::middleware::from_fn(timeout_mw))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            concurrency_mw,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_mw,
+        ))
+        .layer(axum::middleware::from_fn(no_store_mw))
+        .layer(axum::middleware::from_fn(access_log_mw))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics_mw,
+        ))
+        .with_state(state)
+}
+
 #[tokio::main]
 async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -722,34 +786,7 @@ async fn main() {
         rdns_timeout,
     });
 
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics_ep))
-        .route("/generate_204", get(generate_204))
-        .route("/ip", get(ip))
-        .route("/headers", get(headers_echo))
-        .route("/geo", get(geo_ep))
-        .route("/type", get(ip_type))
-        .route("/content", get(content))
-        .route("/judge", get(judge))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            rate_limit_mw,
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            concurrency_mw,
-        ))
-        .layer(axum::middleware::from_fn(timeout_mw))
-        .layer(axum::middleware::from_fn(no_store_mw))
-        .layer(axum::middleware::from_fn(access_log_mw))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            metrics_mw,
-        ))
-        .with_state(state);
+    let app = build_app(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
     tracing::info!("proxpulse-judge v{VERSION} on {addr} (trust_proxy={trust_proxy}, trust_cf={trust_cf}, rate_per_minute={rate_per_minute})");
@@ -805,36 +842,9 @@ mod api_tests {
             concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY)),
             trust_proxy: true,
             trust_cf: true,
-            rdns_timeout: Duration::from_millis(100),
+            rdns_timeout: Duration::ZERO,
         });
-        Router::new()
-            .route("/", get(index))
-            .route("/healthz", get(healthz))
-            .route("/readyz", get(readyz))
-            .route("/metrics", get(metrics_ep))
-            .route("/generate_204", get(generate_204))
-            .route("/ip", get(ip))
-            .route("/headers", get(headers_echo))
-            .route("/geo", get(geo_ep))
-            .route("/type", get(ip_type))
-            .route("/judge", get(judge))
-            .route("/content", get(content))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                rate_limit_mw,
-            ))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                concurrency_mw,
-            ))
-            .layer(axum::middleware::from_fn(timeout_mw))
-            .layer(axum::middleware::from_fn(no_store_mw))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                metrics_mw,
-            ))
-            .layer(axum::middleware::from_fn(add_connect_info))
-            .with_state(state)
+        build_app(state).layer(axum::middleware::from_fn(add_connect_info))
     }
 
     #[test]
@@ -1141,6 +1151,75 @@ mod api_tests {
         let res = maybe_rdns(&state, "8.8.8.8", Some("Google LLC")).await;
         assert!(res.is_none());
         assert!(t0.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn rdns_skipped_for_private_and_loopback_ips() {
+        let state = Arc::new(AppState {
+            geo: Arc::new(GeoPool::open(std::path::Path::new("/nonexistent-dir-xyz"))),
+            geo_cache: Cache::builder().max_capacity(16).build(),
+            ptr_cache: Cache::builder().max_capacity(16).build(),
+            rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
+            rate_limit: Arc::new(RateLimit {
+                per_minute: 1_000_000,
+                hits: new_hits_cache(),
+            }),
+            metrics: Arc::new(Metrics::default()),
+            concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY)),
+            trust_proxy: true,
+            trust_cf: true,
+            rdns_timeout: Duration::from_secs(2),
+        });
+        for ip in [
+            "127.0.0.1",
+            "::1",
+            "10.0.0.1",
+            "172.17.0.1",
+            "192.168.1.1",
+            "100.64.0.1",
+            "169.254.1.1",
+            "203.0.113.7",
+            "2001:db8::1",
+            "fe80::1",
+            "fc00::1",
+        ] {
+            assert!(maybe_rdns(&state, ip, None).await.is_none(), "{ip}");
+        }
+        assert_eq!(state.metrics.rdns_lookups.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn judge_unknown_xff_behind_proxy_is_anonymous() {
+        let res = test_app()
+            .oneshot(
+                Request::get("/judge?direct_ip=1.2.3.4")
+                    .header("x-forwarded-for", "unknown, 5.6.7.8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ip"], "5.6.7.8");
+        assert_eq!(v["xff_chain"], serde_json::json!([]));
+        assert_eq!(v["anonymity"], "anonymous");
+    }
+
+    #[tokio::test]
+    async fn judge_non_ascii_header_still_detects_ip_leak() {
+        let mut req = Request::get("/judge?direct_ip=1.2.3.4")
+            .header("x-forwarded-for", "5.6.7.8")
+            .body(Body::empty())
+            .unwrap();
+        req.headers_mut().insert(
+            "x-client-info",
+            HeaderValue::from_bytes(b"proxy \xc3\xa9 1.2.3.4").unwrap(),
+        );
+        let res = test_app().oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["anonymity"], "transparent");
     }
 
     #[tokio::test]

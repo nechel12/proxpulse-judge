@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.5.5 — 2026-10-27
+
+### Security
+
+- Skip server-side rDNS lookups for loopback, private, link-local, CGNAT, and
+  documentation IP ranges so local/container hostnames and internal PTR records
+  are not exposed.
+- Canonicalize IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) and normalize IP
+  tokens in non-XFF headers (`X-Real-IP`, `Forwarded`, `X-Client-IP`) during
+  leak detection.
+- Decode header values with `from_utf8_lossy` so non-ASCII bytes cannot blank
+  out a header and mask a leaked `direct_ip`.
+- Pass `MAXMIND_LICENSE_KEY` download URLs via `curl --config -` stdin and
+  extract archives with `--no-same-owner` in `scripts/download-geolite2.sh`.
+
+### Fixed
+
+- Classify non-IP `X-Forwarded-For` placeholders (such as Squid's `unknown`) as
+  `anonymous` rather than `elite`, and strip reverse-proxy hops before
+  filtering invalid XFF tokens.
+- Order `rate_limit_mw` outside `concurrency_mw` so rate-limited requests do
+  not consume concurrency permits.
+- Fix `scripts/download-dbip.sh` previous-month date calculation on the 31st of
+  months following 28–30 day months, and add BSD/macOS `date -v-1m` fallback.
+- Check extracted fields in `GeoPool::lookup` before suppressing the country DB
+  fallback, and inspect MMDB `database_type` metadata for attribution.
+- Isolate CI workflow concurrency by event type, scope `packages: write` to the
+  `build` job, and enforce `--locked` in Docker and CI builds.
+
 ## 0.5.4 — 2026-10-27
 
 ### Changed

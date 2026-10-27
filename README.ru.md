@@ -85,8 +85,10 @@ curl https://check.yourdomain.com/healthz
 (дефолт): Cloudflare здесь нет, а CF-заголовки легко подделать.
 
 Если Cloudflare стоит **перед** Caddy, не удаляй CF-заголовки: задай
-`trusted_proxies` диапазонами Cloudflare вместо `0.0.0.0/0`, оставь
-`TRUST_CF=1` и убедись, что `TRUST_PROXY=1`.
+`trusted_proxies` диапазонами Cloudflare вместо `0.0.0.0/0`, ограничь
+порты 80/443 только IP-диапазонами Cloudflare (или включи Authenticated
+Origin Pulls, так как `trusted_proxies` контролирует только `X-Forwarded-*`,
+но не `CF-Connecting-IP`), оставь `TRUST_CF=1` и убедись, что `TRUST_PROXY=1`.
 
 ## Вариант Б — Cloudflare Tunnel (без Caddy и открытых портов)
 
@@ -135,7 +137,7 @@ ingress:
 В этом варианте нужно явно выставить `TRUST_CF=1` и оставить
 `TRUST_PROXY=1`; `TRUST_CF` по умолчанию `0` — это безопасно для Caddy/VPS.
 Сервис возьмёт реальный IP из `CF-Connecting-IP` (его ставит сам
-Cloudflare, приоритет выше `X-Forwarded-For`), а все `cf-*`/`cdn-loop`
+Cloudflare, приоритет выше `X-Forwarded-For`), а все `cf-*`/`cdn-loop`/`true-client-ip`
 заголовки исключаются из
 детекта анонимности — иначе прямая проверка через туннель давала бы
 ложный `transparent`. Проверка:
@@ -381,14 +383,14 @@ HTTP-порт на loopback, задайте rate-limit и настройте
 ## Разработка
 
 ```sh
-cargo test        # 50 тестов: логика, geo-парсинг, API, лимиты
+cargo test        # 56 тестов: логика, geo-парсинг, API, лимиты
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
 
 scripts/smoke.sh http://127.0.0.1:8000
 scripts/load.sh http://127.0.0.1:8000 300 32
 ```
 
-Структура: `src/main.rs` (HTTP), `src/geo.rs` (пул `.mmdb` + кэш),
+Структура: `src/main.rs` (HTTP + кэши), `src/geo.rs` (пул `.mmdb`),
 `src/logic.rs` (анонимность, тип IP, фикс-контент).
 
 ## Связанные проекты

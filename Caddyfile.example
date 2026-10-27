@@ -15,7 +15,10 @@ check.yourdomain.com {
         trusted_proxies 0.0.0.0/0 ::/0
         # Caddy не использует Cloudflare: не даём подделать CF-заголовки.
         # Если Cloudflare стоит ПЕРЕД Caddy, удали эти две строки,
-        # настрой trusted_proxies диапазонами Cloudflare и включи TRUST_CF=1.
+        # настрой trusted_proxies диапазонами Cloudflare, закрой порты
+        # 80/443 от прямых подключений мимо Cloudflare (файрвол или
+        # Authenticated Origin Pulls: trusted_proxies контролирует только
+        # X-Forwarded-*, но не CF-Connecting-IP) и включи TRUST_CF=1.
         header_up -CF-Connecting-IP
         header_up -True-Client-IP
     }

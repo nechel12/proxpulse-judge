@@ -1,5 +1,9 @@
 /target/
-geo/*.mmdb
-geo/*.mmdb.gz
+*.mmdb
+*.mmdb.gz
+geo/.dbip.*
+geo/.geolite2.*
 .env
 .git/
+/audit.md
+/FINAL_AUDIT_REPORT.md

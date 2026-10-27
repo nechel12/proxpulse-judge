@@ -10,8 +10,10 @@
 set -euo pipefail
 
 # сначала пробуем текущий месяц, в первые дни месяца файла может не быть —
-# тогда берём прошлый (на VPS Linux с GNU date)
-MONTHS="$(date +%Y-%m) $(date -d 'last month' +%Y-%m 2>/dev/null || true)"
+# тогда берём прошлый (привязка к 15-му числу избегает переполнения GNU date
+# 31-го числа на месяцах из 28–30 дней; -v-1m — фолбэк для BSD/macOS date)
+PREV_MONTH="$(date -d "$(date +%Y-%m-15) -1 month" +%Y-%m 2>/dev/null || date -v-1m +%Y-%m 2>/dev/null || true)"
+MONTHS="$(date +%Y-%m) $PREV_MONTH"
 if [ $# -ge 1 ]; then MONTHS="$1"; fi   # можно передать 2026-08 вручную
 
 DIR="${GEO_DIR:-$(dirname "$0")/../geo}"

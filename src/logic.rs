@@ -71,12 +71,13 @@ pub fn clean_host(s: &str) -> String {
 }
 
 /// Canonical textual form of an address taken from a header:
-/// trims, unwraps `[v6]:port` / `v4:port`, validates, and re-prints it.
-fn normalize_host(s: &str) -> Option<String> {
+/// trims, unwraps `[v6]:port` / `v4:port`, validates, canonicalizes
+/// IPv4-mapped IPv6 (`::ffff:a.b.c.d` → `a.b.c.d`), and re-prints it.
+pub fn normalize_host(s: &str) -> Option<String> {
     clean_host(s)
         .parse::<std::net::IpAddr>()
         .ok()
-        .map(|ip| ip.to_string())
+        .map(|ip| ip.to_canonical().to_string())
 }
 
 fn is_ipv4_char(c: char) -> bool {
@@ -89,19 +90,27 @@ fn is_ipv6_char(c: char) -> bool {
 
 /// True when `ip` occurs in `text` on character boundaries (so
 /// `1.2.3.4` does not match inside `1.2.3.40`, and `::1` does not
-/// match inside `::10`).
+/// match inside `::10`), including non-canonical IPv6 or IPv4-mapped forms.
 fn ip_in_text(text: &str, ip: &std::net::IpAddr) -> bool {
+    let ip = ip.to_canonical();
     let needle = ip.to_string().to_ascii_lowercase();
     let haystack = text.to_ascii_lowercase();
     let boundary: fn(char) -> bool = match ip {
         std::net::IpAddr::V4(_) => is_ipv4_char,
         std::net::IpAddr::V6(_) => is_ipv6_char,
     };
-    haystack.match_indices(&needle).any(|(idx, _)| {
+    if haystack.match_indices(&needle).any(|(idx, _)| {
         let before = haystack[..idx].chars().next_back();
         let after = haystack[idx + needle.len()..].chars().next();
         !before.map(boundary).unwrap_or(false) && !after.map(boundary).unwrap_or(false)
-    })
+    }) {
+        return true;
+    }
+    haystack
+        .split(|c: char| !is_ipv6_char(c))
+        .filter(|tok| !tok.is_empty())
+        .filter_map(normalize_host)
+        .any(|cand| cand == needle)
 }
 
 /// Resolve the real client IP (= proxy exit IP when checked via proxy).
@@ -145,19 +154,19 @@ pub fn client_ip(
 ///   only fires when the client was actually resolved from a valid
 ///   `CF-Connecting-IP`, otherwise the legacy single pop applies and the
 ///   Caddy/VPS behaviour is unchanged.
-pub fn forwarded_chain(
+///
+/// Raw XFF tokens added BEFORE our reverse proxy (including non-IP placeholders
+/// such as Squid's `unknown`).
+pub fn pre_edge_xff(
     xff: Option<&str>,
     client: &str,
     trust_proxy: bool,
     trust_cf: bool,
     cf_ip: Option<&str>,
 ) -> Vec<String> {
-    let mut chain: Vec<String> = split_xff(xff)
-        .into_iter()
-        .filter_map(|e| normalize_host(&e))
-        .collect();
+    let mut raw = split_xff(xff);
     if !trust_proxy {
-        return chain;
+        return raw;
     }
     let client = normalize_host(client).unwrap_or_else(|| client.to_string());
     // CDN branch: same condition as the CF priority in [`client_ip`]; the
@@ -173,18 +182,34 @@ pub fn forwarded_chain(
         // so the *last* occurrence marks where our infrastructure begins.
         // The first occurrence may be a value the checked proxy prepended
         // itself, and truncating there would hide leaks after it.
-        if let Some(pos) = chain.iter().rposition(|e| e == &client) {
-            chain.truncate(pos);
+        if let Some(pos) = raw
+            .iter()
+            .rposition(|e| normalize_host(e).as_deref() == Some(client.as_str()))
+        {
+            raw.truncate(pos);
         }
         // Drop any remaining copies of the edge/client address (an elite
         // proxy may have put its own exit into XFF as well).
-        chain.retain(|e| e != &client);
-        return chain;
+        raw.retain(|e| normalize_host(e).as_deref() != Some(client.as_str()));
+        return raw;
     }
-    if chain.last().map(|s| s.as_str()) == Some(client.as_str()) {
-        chain.pop();
+    if raw.last().and_then(|s| normalize_host(s)).as_deref() == Some(client.as_str()) {
+        raw.pop();
     }
-    chain
+    raw
+}
+
+pub fn forwarded_chain(
+    xff: Option<&str>,
+    client: &str,
+    trust_proxy: bool,
+    trust_cf: bool,
+    cf_ip: Option<&str>,
+) -> Vec<String> {
+    pre_edge_xff(xff, client, trust_proxy, trust_cf, cf_ip)
+        .into_iter()
+        .filter_map(|e| normalize_host(&e))
+        .collect()
 }
 
 fn is_infra(name: &str, trust_cf: bool) -> bool {
@@ -229,11 +254,11 @@ pub fn anonymity_level(
     direct_ip: Option<&str>,
     trust_cf: bool,
 ) -> &'static str {
-    let chain: Vec<String> = split_xff(headers.get("x-forwarded-for").map(|s| s.as_str()))
-        .into_iter()
-        .filter_map(|e| normalize_host(&e))
-        .collect();
-    let direct: Option<std::net::IpAddr> = direct_ip.and_then(|d| d.parse().ok());
+    let raw_xff = split_xff(headers.get("x-forwarded-for").map(|s| s.as_str()));
+    let chain: Vec<String> = raw_xff.iter().filter_map(|e| normalize_host(e)).collect();
+    let direct: Option<std::net::IpAddr> = direct_ip
+        .and_then(normalize_host)
+        .and_then(|d| d.parse().ok());
 
     if let Some(d) = direct {
         let d_str = d.to_string();
@@ -251,7 +276,7 @@ pub fn anonymity_level(
         // multi-hop chain without a known direct IP: something leaks hops
         return "transparent";
     }
-    if !chain.is_empty() {
+    if !chain.is_empty() || !raw_xff.is_empty() {
         return "anonymous";
     }
     if headers.keys().any(|k| is_telltale(k, trust_cf)) {
@@ -790,6 +815,56 @@ mod tests {
         );
         let h = map(&[("x-forwarded-for", "2001:db8::10")]);
         assert_eq!(anonymity_level(&h, Some("2001:db8::1"), true), "anonymous");
+        // Non-canonical IPv6 in non-XFF headers must also be detected as a leak
+        let h = map(&[("x-real-ip", "2001:0db8:0:0:0:0:0:1")]);
+        assert_eq!(
+            anonymity_level(&h, Some("2001:db8::1"), true),
+            "transparent"
+        );
+        let h = map(&[(
+            "forwarded",
+            "for=\"[2001:0db8:0:0:0:0:0:1]:8080\";proto=http",
+        )]);
+        assert_eq!(
+            anonymity_level(&h, Some("2001:db8::1"), true),
+            "transparent"
+        );
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_is_canonicalized() {
+        assert_eq!(
+            normalize_host("::ffff:1.2.3.4"),
+            Some("1.2.3.4".to_string())
+        );
+        assert_eq!(
+            normalize_host("[::ffff:1.2.3.4]:8080"),
+            Some("1.2.3.4".to_string())
+        );
+        let h = map(&[("x-forwarded-for", "::ffff:1.2.3.4")]);
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "transparent");
+        let h = map(&[("x-forwarded-for", "1.2.3.4")]);
+        assert_eq!(
+            anonymity_level(&h, Some("::ffff:1.2.3.4"), true),
+            "transparent"
+        );
+        let h = map(&[("x-client-ip", "::ffff:0102:0304")]);
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "transparent");
+    }
+
+    #[test]
+    fn unknown_xff_is_anonymous_not_elite() {
+        let h = map(&[("x-forwarded-for", "unknown")]);
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "anonymous");
+        assert_eq!(anonymity_level(&h, None, true), "anonymous");
+    }
+
+    #[test]
+    fn trailing_garbage_xff_does_not_pop_earlier_client_hop() {
+        assert_eq!(
+            forwarded_chain(Some("9.9.9.9, garbage"), "9.9.9.9", true, false, None),
+            vec!["9.9.9.9".to_string()]
+        );
     }
 
     #[test]
