@@ -15,10 +15,10 @@ the proxy exit IP, geo from **local** `.mmdb` files, request headers for
 anonymity analysis, and fixed content for tamper checks.
 
 Stack: **Rust + axum + tokio**, databases in RAM, lookup cache. No third-party
-HTTP APIs at runtime; a configurable rate limiter (`RATE_LIMIT_PER_MINUTE`,
-6000/min per IP by default). The service is a single binary on `debian:slim`;
-the image also includes `bash`, `curl`, and `gzip` for the optional database
-fallback.
+HTTP APIs in the request path; a configurable rate limiter
+(`RATE_LIMIT_PER_MINUTE`, 6000/min per IP by default). The service is a single
+binary on `debian:slim`; the image also includes `bash`, `curl`, and `gzip` for
+the optional database fallback.
 
 > Status: pre-1.0. The documented HTTP endpoints are intended to be stable,
 > but behavior may change in minor releases.
