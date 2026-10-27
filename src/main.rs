@@ -400,19 +400,71 @@ fn healthcheck(port: u16) -> bool {
         Ok(a) => a,
         Err(_) => return false,
     };
-    let mut s = match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(4)) {
+    // Two seconds for connect and two for read stays below the Docker
+    // healthcheck timeout (5s) instead of potentially taking 8s.
+    let mut s = match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(s) => s,
         Err(_) => return false,
     };
-    s.set_read_timeout(Some(Duration::from_secs(4))).ok();
+    s.set_read_timeout(Some(Duration::from_secs(2))).ok();
     if s.write_all(b"GET /healthz HTTP/1.0\r\nHost: x\r\n\r\n")
         .is_err()
     {
         return false;
     }
+    let mut resp = Vec::new();
     let mut buf = [0u8; 256];
-    let n = s.read(&mut buf).unwrap_or(0);
-    String::from_utf8_lossy(&buf[..n]).contains("200")
+    while resp.len() < 1024 {
+        let n = s.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        resp.extend_from_slice(&buf[..n]);
+        if resp.windows(2).any(|w| w == b"\r\n") {
+            break;
+        }
+    }
+    // Check the status line, not an arbitrary "200" elsewhere in headers.
+    let text = String::from_utf8_lossy(&resp);
+    text.lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        == Some("200")
+}
+
+/// Add `Cache-Control: no-store` to every per-request response. Only the
+/// fixed-content endpoint is safe to cache.
+async fn no_store_mw(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path().to_string();
+    let mut res = next.run(req).await;
+    if path != "/content" {
+        res.headers_mut()
+            .insert("cache-control", HeaderValue::from_static("no-store"));
+    }
+    res
+}
+
+/// Lightweight access logging at debug level; default `RUST_LOG=info`
+/// keeps normal request handling quiet.
+async fn access_log_mw(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let started = Instant::now();
+    let res = next.run(req).await;
+    tracing::debug!(
+        method = %method,
+        path = %path,
+        status = res.status().as_u16(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "request"
+    );
+    res
 }
 
 async fn shutdown_signal() {
@@ -441,9 +493,9 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let port: u16 = env::var("PORT")
         .ok()
@@ -496,18 +548,29 @@ async fn main() {
             state.clone(),
             rate_limit_mw,
         ))
+        .layer(axum::middleware::from_fn(no_store_mw))
+        .layer(axum::middleware::from_fn(access_log_mw))
         .with_state(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
     tracing::info!("proxpulse-judge v{VERSION} on {addr} (trust_proxy={trust_proxy}, trust_cf={trust_cf}, rate_per_minute={rate_per_minute})");
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("cannot bind {addr}: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
-    .unwrap();
+    {
+        tracing::error!("server error: {e}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -539,12 +602,16 @@ mod api_tests {
             .route("/healthz", get(healthz))
             .route("/generate_204", get(generate_204))
             .route("/ip", get(ip))
+            .route("/headers", get(headers_echo))
+            .route("/geo", get(geo_ep))
+            .route("/type", get(ip_type))
             .route("/judge", get(judge))
             .route("/content", get(content))
             .layer(axum::middleware::from_fn_with_state(
                 state.clone(),
                 rate_limit_mw,
             ))
+            .layer(axum::middleware::from_fn(no_store_mw))
             .with_state(state)
     }
 
@@ -641,6 +708,30 @@ mod api_tests {
                 .and_then(|v| v.to_str().ok()),
             Some("no-store")
         );
+    }
+
+    #[tokio::test]
+    async fn dynamic_endpoints_are_no_store() {
+        for path in ["/ip", "/headers", "/geo", "/type", "/healthz"] {
+            let res = test_app()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                res.headers()
+                    .get("cache-control")
+                    .and_then(|v| v.to_str().ok()),
+                Some("no-store"),
+                "{path}"
+            );
+        }
+        // /content is the fixed integrity reference and may be cached.
+        let res = test_app()
+            .oneshot(Request::get("/content").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(res.headers().get("cache-control").is_none());
     }
 
     #[tokio::test]
