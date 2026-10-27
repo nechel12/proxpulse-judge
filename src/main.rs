@@ -27,7 +27,7 @@ use std::{
 use geo::{GeoInfo, GeoPool};
 use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
 
-const VERSION: &str = "0.5.2";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Rolling 60s window for one key. 0 disables the limiter before this is
 /// called. Pure function for testability: returns Some(retry_after_secs)
@@ -72,7 +72,7 @@ async fn rate_limit_mw(
     next: axum::middleware::Next,
 ) -> impl IntoResponse {
     let path = req.uri().path().to_string();
-    if s.rate_limit.per_minute > 0 && path != "/healthz" && path != "/" {
+    if s.rate_limit.per_minute > 0 && path != "/healthz" {
         let conn = req.extensions().get::<ConnectInfo<SocketAddr>>().cloned();
         let key = self_ip(req.headers(), conn, s.trust_proxy, s.trust_cf);
         let retry = {
@@ -304,7 +304,12 @@ async fn geo_ep(
 ) -> impl IntoResponse {
     let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
     let data = geo_cached(&s, &me);
-    Json(serde_json::json!({ "ip": me, "geo": data, "source": sources_or_null(&s) }))
+    Json(serde_json::json!({
+        "ip": me,
+        "geo": data,
+        "source": sources_or_null(&s),
+        "attribution": attribution(&s),
+    }))
 }
 
 fn sources_or_null(s: &AppState) -> serde_json::Value {
@@ -314,6 +319,23 @@ fn sources_or_null(s: &AppState) -> serde_json::Value {
     } else {
         serde_json::json!(m)
     }
+}
+
+/// Required attribution for the DB actually loaded (DB-IP CC BY 4.0 /
+/// MaxMind GeoLite2 EULA), so API consumers can show it with geo results.
+fn attribution(s: &AppState) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for src in s.geo.sources().values() {
+        let name = src.to_ascii_lowercase();
+        if name.contains("maxmind") || name.contains("geolite") {
+            out.push("This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com");
+        } else if name.contains("dbip") {
+            out.push("IP Geolocation by DB-IP (https://db-ip.com)");
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 async fn ip_type(
@@ -381,6 +403,7 @@ async fn judge(
         "anonymity": level,
         "geo": g,
         "geo_source": sources_or_null(&s),
+        "attribution": attribution(&s),
         "ip_type": t,
         "type_signals": signals,
         "content_version": logic::CONTENT_VERSION,

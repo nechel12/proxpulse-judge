@@ -17,7 +17,7 @@ RUN cargo build --release && (strip target/release/proxpulse-judge || true)
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        bash curl ca-certificates unzip \
+        bash curl ca-certificates gzip \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 10001 judge \
     && mkdir -p /app/geo /app/scripts \

@@ -9,8 +9,9 @@ a bunch of third-party services (ip-api, httpbin): it sees the proxy exit IP,
 resolves geo from **local** `.mmdb` files, echoes request headers for anonymity
 detection, and serves fixed content for tamper checks.
 
-Stack: **Rust + axum + tokio**, databases in RAM, lookup LRU cache. No external
-APIs, no limits, a single runtime-free binary in `debian:slim`.
+Stack: **Rust + axum + tokio**, databases in RAM, lookup cache. No external
+APIs; a built-in rate limiter is configurable (`RATE_LIMIT_PER_MINUTE`,
+6000/min per IP by default). A single runtime-free binary in `debian:slim`.
 
 ## Quickstart
 
@@ -162,10 +163,11 @@ passthrough and `/healthz` as the health check are required.
 
 | Method | Path | Purpose |
 |---|---|---|
+| GET | `/` | service, version, geo sources, licenses |
 | GET | `/generate_204` | `204` empty — cheap liveness check |
 | GET | `/ip` | `{"ip": "..."}` — exit IP |
 | GET | `/headers` | `{"ip", "headers", "xff_chain"}` — header echo |
-| GET | `/geo` | `{"ip", "geo", "source"}` — country/city/ASN from local DBs |
+| GET | `/geo` | `{"ip", "geo", "source", "attribution"}` — country/city/ASN from local DBs |
 | GET | `/type` | `{"ip", "ip_type", "signals"}` — IP type with reasoning |
 | GET | `/content` | fixed bytes — integrity reference |
 | GET | `/judge?direct_ip=...` | everything at once + `anonymity`, `content_sha256` |
@@ -200,8 +202,9 @@ Example `/judge` response:
 ## Public instances
 
 The primary instance — **https://proxycheck.lmtunnel.com**: enabled
-in the checker by default. Limit — 1000 requests per minute per IP
-(429 + `Retry-After` on exceed).
+in the checker by default. It is configured with a 1000 requests per
+minute per IP limit (429 + `Retry-After` on exceed; the code default is
+6000, see the table below).
 
 The fallback instance — **https://proxpulse-judge.onrender.com**
 (free Render hosting, DB-IP Lite databases, image refreshed monthly).
@@ -223,8 +226,9 @@ finds files by itself:
 - `GeoLite2-ASN.mmdb` or `dbip-asn-lite.mmdb`
 - `GeoLite2-Country.mmdb` — fallback if there is no City
 
-Without files, geo fields come back empty (`"error": "no db"`, type is
-`unknown`); everything else works.
+Without files, geo fields come back empty (`"error": "no db"`); the type
+is usually `unknown` (rDNS may still provide a hint); everything else
+works.
 
 ### Database licenses (important)
 
@@ -317,8 +321,8 @@ For running without Docker with logs in a file — example
 ## Development
 
 ```sh
-cargo test        # 34 tests: logic, geo parsing, API, limits
-cargo run         # PORT=8000 GEO_DIR=./geo TRUST_PROXY=0
+cargo test        # 49 tests: logic, geo parsing, API, limits
+PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
 ```
 
 Structure: `src/main.rs` (HTTP), `src/geo.rs` (`.mmdb` pool + LRU),
