@@ -9,6 +9,9 @@
 name: docker
 
 on:
+  push:
+    branches: [main]
+  pull_request:
   schedule:
     - cron: "0 4 3 * *" # 3-е число каждого месяца, 04:00 UTC (как cron в README)
   workflow_dispatch:
@@ -17,9 +20,39 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  build:
+    needs: test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
     steps:
       - uses: actions/checkout@v4
 
@@ -52,8 +85,8 @@ jobs:
 
       # Авто-редеплой своего Render-сервиса после свежей сборки.
       # Секретом владеет только владелец форка: в этом репо секрета нет
-      # и шаг скипается. Нюанс синтаксиса: контекст secrets недоступен
-      # прямо в if, поэтому секрет сначала кладём в env шага.
+      # и шаг скипается. Секрет лежит в env job (не step): if у шага
+      # вычисляется до применения его собственного env.
       # Форкам: Render dashboard → service → Settings → Deploy Hook →
       # скопировать URL в Secrets → RENDER_DEPLOY_HOOK, плюс включить
       # Actions во вкладке Actions форка (по умолчанию выключены; шедула
@@ -61,6 +94,4 @@ jobs:
       # активности — см. README, вариант В).
       - name: Trigger Render redeploy
         if: ${{ env.RENDER_DEPLOY_HOOK != '' }}
-        env:
-          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
         run: curl -fsS "$RENDER_DEPLOY_HOOK"
