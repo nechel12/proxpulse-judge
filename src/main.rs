@@ -29,32 +29,13 @@ use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
 
 const VERSION: &str = "0.5.2";
 
-/// Fixed-window-ish per-IP limiter: at most `per_minute` requests
-/// in any rolling 60s window. 0 disables. Pure function for testability:
-/// returns Some(retry_after_secs) when over the limit.
-fn check_limit(
-    hits: &mut HashMap<String, VecDeque<Instant>>,
-    key: &str,
-    now: Instant,
-    limit: u32,
-) -> Option<u64> {
-    // occasional full sweep so spoofed keys can't grow the map forever
-    if hits.len() > 200_000 {
-        hits.retain(|_, q| {
-            while q
-                .front()
-                .map(|t| now.duration_since(*t).as_secs() >= 60)
-                .unwrap_or(false)
-            {
-                q.pop_front();
-            }
-            !q.is_empty()
-        });
-        if hits.len() > 200_000 {
-            return Some(60);
-        }
+/// Rolling 60s window for one key. 0 disables the limiter before this is
+/// called. Pure function for testability: returns Some(retry_after_secs)
+/// when over the limit.
+fn check_limit(q: &mut VecDeque<Instant>, now: Instant, limit: u32) -> Option<u64> {
+    if limit == 0 {
+        return None;
     }
-    let q = hits.entry(key.to_string()).or_default();
     while q
         .front()
         .map(|t| now.duration_since(*t).as_secs() >= 60)
@@ -63,8 +44,9 @@ fn check_limit(
         q.pop_front();
     }
     if q.len() as u32 >= limit {
-        let oldest = *q.front().unwrap();
-        return Some((60 - now.duration_since(oldest).as_secs() + 1).max(1));
+        if let Some(oldest) = q.front().copied() {
+            return Some((60 - now.duration_since(oldest).as_secs() + 1).max(1));
+        }
     }
     q.push_back(now);
     None
@@ -72,7 +54,16 @@ fn check_limit(
 
 struct RateLimit {
     per_minute: u32,
-    hits: Mutex<HashMap<String, VecDeque<Instant>>>,
+    /// Bounded per-key deques: moka evicts whole keys, so memory cannot
+    /// grow without limit and there is no global sweep under one lock.
+    hits: Cache<String, Arc<Mutex<VecDeque<Instant>>>>,
+}
+
+fn new_hits_cache() -> Cache<String, Arc<Mutex<VecDeque<Instant>>>> {
+    Cache::builder()
+        .max_capacity(100_000)
+        .time_to_idle(Duration::from_secs(120))
+        .build()
 }
 
 async fn rate_limit_mw(
@@ -85,8 +76,12 @@ async fn rate_limit_mw(
         let conn = req.extensions().get::<ConnectInfo<SocketAddr>>().cloned();
         let key = self_ip(req.headers(), conn, s.trust_proxy, s.trust_cf);
         let retry = {
-            let mut hits = s.rate_limit.hits.lock().unwrap();
-            check_limit(&mut hits, &key, Instant::now(), s.rate_limit.per_minute)
+            let entry = s
+                .rate_limit
+                .hits
+                .get_with(key, || Arc::new(Mutex::new(VecDeque::new())));
+            let mut q = entry.lock().unwrap_or_else(|p| p.into_inner());
+            check_limit(&mut q, Instant::now(), s.rate_limit.per_minute)
         };
         if let Some(secs) = retry {
             let mut h = HeaderMap::new();
@@ -480,7 +475,7 @@ async fn main() {
         rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
         rate_limit: Arc::new(RateLimit {
             per_minute: rate_per_minute,
-            hits: Mutex::new(HashMap::new()),
+            hits: new_hits_cache(),
         }),
         trust_proxy,
         trust_cf,
@@ -533,7 +528,7 @@ mod api_tests {
             rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
             rate_limit: Arc::new(RateLimit {
                 per_minute,
-                hits: Mutex::new(HashMap::new()),
+                hits: new_hits_cache(),
             }),
             trust_proxy: true,
             trust_cf: true,
@@ -571,14 +566,17 @@ mod api_tests {
 
     #[test]
     fn limit_window_allows_then_blocks() {
-        let mut hits = HashMap::new();
+        let mut q = VecDeque::new();
         let now = Instant::now();
-        assert_eq!(check_limit(&mut hits, "1.2.3.4", now, 2), None);
-        assert_eq!(check_limit(&mut hits, "1.2.3.4", now, 2), None);
-        let retry = check_limit(&mut hits, "1.2.3.4", now, 2);
+        assert_eq!(check_limit(&mut q, now, 2), None);
+        assert_eq!(check_limit(&mut q, now, 2), None);
+        let retry = check_limit(&mut q, now, 2);
         assert!(retry.is_some() && retry.unwrap() >= 1 && retry.unwrap() <= 61);
-        // another IP has its own budget
-        assert_eq!(check_limit(&mut hits, "5.6.7.8", now, 2), None);
+        // another key has its own queue/budget
+        let mut other = VecDeque::new();
+        assert_eq!(check_limit(&mut other, now, 2), None);
+        // limit = 0 is a no-op even on an empty queue
+        assert_eq!(check_limit(&mut VecDeque::new(), now, 0), None);
     }
 
     #[tokio::test]
@@ -785,7 +783,7 @@ mod api_tests {
             rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
             rate_limit: Arc::new(RateLimit {
                 per_minute: 1_000_000,
-                hits: Mutex::new(HashMap::new()),
+                hits: new_hits_cache(),
             }),
             trust_proxy: true,
             trust_cf: true,
