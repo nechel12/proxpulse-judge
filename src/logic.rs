@@ -2,6 +2,7 @@
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 /// Fixed tamper-check content. Never change bytes without bumping
 /// [`CONTENT_VERSION`], otherwise checkers comparing against an old
@@ -13,7 +14,15 @@ pub const FIXED_CONTENT: &[u8] =
 pub fn content_sha256() -> String {
     let mut h = Sha256::new();
     h.update(FIXED_CONTENT);
-    format!("{:x}", h.finalize())
+    hex_lower(h.finalize().as_ref())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    out
 }
 
 /// Headers a reverse proxy (Caddy/nginx) adds itself. They must NOT be

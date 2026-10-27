@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -46,19 +46,44 @@ jobs:
       - name: Test
         run: cargo test
 
-  build:
+  smoke:
     needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build image
+        run: docker build -t proxpulse-judge:smoke -f Dockerfile .
+
+      - name: Smoke and load checks
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name judge-smoke -p 127.0.0.1:8000:8000 \
+            -v "$PWD/geo:/app/geo:ro" proxpulse-judge:smoke
+          trap 'docker logs judge-smoke || true; docker stop judge-smoke || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/healthz >/dev/null; then break; fi
+            sleep 1
+          done
+          bash scripts/smoke.sh http://127.0.0.1:8000
+          bash scripts/load.sh http://127.0.0.1:8000 300 32
+
+  build:
+    needs: [test, smoke]
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -72,8 +97,14 @@ jobs:
         id: tag
         run: echo "month=$(date +%Y%m)" >> "$GITHUB_OUTPUT"
 
+      - name: Version tag
+        id: version
+        run: |
+          version="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
+          echo "version=v$version" >> "$GITHUB_OUTPUT"
+
       - name: Build and push (no cache — DBs must be fresh)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.render
@@ -82,6 +113,7 @@ jobs:
           tags: |
             ${{ steps.img.outputs.name }}:latest
             ${{ steps.img.outputs.name }}:${{ steps.tag.outputs.month }}
+            ${{ steps.img.outputs.name }}:${{ steps.version.outputs.version }}
 
       # Авто-редеплой своего Render-сервиса после свежей сборки.
       # Секретом владеет только владелец форка: в этом репо секрета нет

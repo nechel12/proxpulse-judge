@@ -20,7 +20,10 @@ use std::{
     collections::{HashMap, VecDeque},
     env,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 
@@ -29,6 +32,8 @@ use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPOSITORY: &str = "https://github.com/nechel12/proxpulse-judge";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_CONCURRENCY: usize = 512;
 
 /// Rolling 60s window for one key. 0 disables the limiter before this is
 /// called. Pure function for testability: returns Some(retry_after_secs)
@@ -67,13 +72,27 @@ fn new_hits_cache() -> Cache<String, Arc<Mutex<VecDeque<Instant>>>> {
         .build()
 }
 
+/// Process-local counters exported on `/metrics`; no external metrics
+/// dependency is needed.
+#[derive(Default)]
+struct Metrics {
+    requests: AtomicU64,
+    responses_4xx: AtomicU64,
+    responses_5xx: AtomicU64,
+    rate_limited: AtomicU64,
+    rdns_lookups: AtomicU64,
+    rdns_timeouts: AtomicU64,
+    rdns_skipped: AtomicU64,
+}
+
 async fn rate_limit_mw(
     State(s): State<Arc<AppState>>,
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> impl IntoResponse {
     let path = req.uri().path().to_string();
-    if s.rate_limit.per_minute > 0 && path != "/healthz" {
+    if s.rate_limit.per_minute > 0 && path != "/healthz" && path != "/readyz" && path != "/metrics"
+    {
         let conn = req.extensions().get::<ConnectInfo<SocketAddr>>().cloned();
         let key = self_ip(req.headers(), conn, s.trust_proxy, s.trust_cf);
         let retry = {
@@ -85,6 +104,7 @@ async fn rate_limit_mw(
             check_limit(&mut q, Instant::now(), s.rate_limit.per_minute)
         };
         if let Some(secs) = retry {
+            s.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
             let mut h = HeaderMap::new();
             h.insert(
                 "retry-after",
@@ -101,6 +121,66 @@ async fn rate_limit_mw(
     next.run(req).await
 }
 
+async fn metrics_mw(
+    State(s): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let res = next.run(req).await;
+    s.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    let status = res.status();
+    if status.is_client_error() {
+        s.metrics.responses_4xx.fetch_add(1, Ordering::Relaxed);
+    }
+    if status.is_server_error() {
+        s.metrics.responses_5xx.fetch_add(1, Ordering::Relaxed);
+    }
+    res
+}
+
+async fn concurrency_mw(
+    State(s): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path();
+    if matches!(path, "/healthz" | "/readyz" | "/metrics") {
+        return next.run(req).await;
+    }
+    let permit = match tokio::time::timeout(
+        Duration::from_secs(5),
+        s.concurrency.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "busy" })),
+            )
+                .into_response()
+        }
+    };
+    let res = next.run(req).await;
+    drop(permit);
+    res
+}
+
+async fn timeout_mw(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Response {
+    match tokio::time::timeout(REQUEST_TIMEOUT, next.run(req)).await {
+        Ok(res) => res,
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({ "error": "request timeout" })),
+        )
+            .into_response(),
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     geo: Arc<GeoPool>,
@@ -108,6 +188,8 @@ struct AppState {
     ptr_cache: Cache<String, Option<String>>,
     rdns_sem: Arc<tokio::sync::Semaphore>,
     rate_limit: Arc<RateLimit>,
+    metrics: Arc<Metrics>,
+    concurrency: Arc<tokio::sync::Semaphore>,
     trust_proxy: bool,
     trust_cf: bool,
     rdns_timeout: Duration,
@@ -196,13 +278,19 @@ async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<Str
     // in a timeout only stops waiting, not the resolver call. This bounds
     // the number of real blocking lookups (and their threads) to the
     // semaphore, even when callers give up early.
-    let permit = tokio::time::timeout(
+    let permit = match tokio::time::timeout(
         Duration::from_millis(100),
         state.rdns_sem.clone().acquire_owned(),
     )
     .await
-    .ok()?
-    .ok()?;
+    {
+        Ok(Ok(permit)) => permit,
+        _ => {
+            state.metrics.rdns_skipped.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+    };
+    state.metrics.rdns_lookups.fetch_add(1, Ordering::Relaxed);
     let cache = state.ptr_cache.clone();
     let key_for_task = key.clone();
     let fut = tokio::task::spawn_blocking(move || {
@@ -218,7 +306,10 @@ async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<Str
     });
     match tokio::time::timeout(state.rdns_timeout, fut).await {
         Ok(Ok(v)) => v,
-        _ => None,
+        _ => {
+            state.metrics.rdns_timeouts.fetch_add(1, Ordering::Relaxed);
+            None
+        }
     }
 }
 
@@ -251,12 +342,72 @@ async fn index(State(s): State<Arc<AppState>>) -> impl IntoResponse {
             "GET /content",
             "GET /judge",
             "GET /healthz",
+            "GET /readyz",
+            "GET /metrics",
         ],
     }))
 }
 
 async fn healthz() -> impl IntoResponse {
     Json(serde_json::json!({"ok": true}))
+}
+
+async fn readyz(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    let sources = s.geo.sources();
+    Json(serde_json::json!({
+        "ok": true,
+        "geo_ready": !sources.is_empty(),
+        "geo_sources": sources,
+    }))
+}
+
+async fn metrics_ep(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    let m = &s.metrics;
+    let geo_ready = if s.geo.sources().is_empty() { 0 } else { 1 };
+    let body = format!(
+        "# HELP proxpulse_requests_total Total HTTP requests handled.\n\
+         # TYPE proxpulse_requests_total counter\n\
+         proxpulse_requests_total {}\n\
+         # HELP proxpulse_responses_4xx_total Responses with 4xx status.\n\
+         # TYPE proxpulse_responses_4xx_total counter\n\
+         proxpulse_responses_4xx_total {}\n\
+         # HELP proxpulse_responses_5xx_total Responses with 5xx status.\n\
+         # TYPE proxpulse_responses_5xx_total counter\n\
+         proxpulse_responses_5xx_total {}\n\
+         # HELP proxpulse_rate_limited_total Requests rejected by the rate limiter.\n\
+         # TYPE proxpulse_rate_limited_total counter\n\
+         proxpulse_rate_limited_total {}\n\
+         # HELP proxpulse_rdns_lookups_total Blocking rDNS lookups spawned.\n\
+         # TYPE proxpulse_rdns_lookups_total counter\n\
+         proxpulse_rdns_lookups_total {}\n\
+         # HELP proxpulse_rdns_timeouts_total rDNS lookups that exceeded the request timeout.\n\
+         # TYPE proxpulse_rdns_timeouts_total counter\n\
+         proxpulse_rdns_timeouts_total {}\n\
+         # HELP proxpulse_rdns_skipped_total Requests skipped because no rDNS permit was available.\n\
+         # TYPE proxpulse_rdns_skipped_total counter\n\
+         proxpulse_rdns_skipped_total {}\n\
+         # HELP proxpulse_geo_ready 1 when at least one geo database is loaded.\n\
+         # TYPE proxpulse_geo_ready gauge\n\
+         proxpulse_geo_ready {}\n\
+         # HELP proxpulse_build_info Build version information.\n\
+         # TYPE proxpulse_build_info gauge\n\
+         proxpulse_build_info{{version=\"{}\"}} 1\n",
+        m.requests.load(Ordering::Relaxed),
+        m.responses_4xx.load(Ordering::Relaxed),
+        m.responses_5xx.load(Ordering::Relaxed),
+        m.rate_limited.load(Ordering::Relaxed),
+        m.rdns_lookups.load(Ordering::Relaxed),
+        m.rdns_timeouts.load(Ordering::Relaxed),
+        m.rdns_skipped.load(Ordering::Relaxed),
+        geo_ready,
+        VERSION,
+    );
+    let mut h = HeaderMap::new();
+    h.insert(
+        "content-type",
+        HeaderValue::from_static("text/plain; version=0.0.4"),
+    );
+    (h, body)
 }
 
 async fn generate_204() -> impl IntoResponse {
@@ -531,6 +682,16 @@ async fn main() {
     }
 
     let geo_dir = env::var("GEO_DIR").unwrap_or_else(|_| "/app/geo".to_string());
+    if std::env::args().any(|a| a == "--check-geo") {
+        let pool = GeoPool::open(std::path::Path::new(&geo_dir));
+        match pool.verify() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("geo validation failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
     let trust_proxy = env::var("TRUST_PROXY").unwrap_or_else(|_| "1".to_string()) == "1";
     // CF headers are proxy headers too: without TRUST_PROXY the service
     // must resolve the IP from the socket, never from client headers.
@@ -554,6 +715,8 @@ async fn main() {
             per_minute: rate_per_minute,
             hits: new_hits_cache(),
         }),
+        metrics: Arc::new(Metrics::default()),
+        concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY)),
         trust_proxy,
         trust_cf,
         rdns_timeout,
@@ -562,6 +725,8 @@ async fn main() {
     let app = Router::new()
         .route("/", get(index))
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics_ep))
         .route("/generate_204", get(generate_204))
         .route("/ip", get(ip))
         .route("/headers", get(headers_echo))
@@ -573,8 +738,17 @@ async fn main() {
             state.clone(),
             rate_limit_mw,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            concurrency_mw,
+        ))
+        .layer(axum::middleware::from_fn(timeout_mw))
         .layer(axum::middleware::from_fn(no_store_mw))
         .layer(axum::middleware::from_fn(access_log_mw))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            metrics_mw,
+        ))
         .with_state(state);
 
     let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
@@ -618,6 +792,8 @@ mod api_tests {
                 per_minute,
                 hits: new_hits_cache(),
             }),
+            metrics: Arc::new(Metrics::default()),
+            concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY)),
             trust_proxy: true,
             trust_cf: true,
             rdns_timeout: Duration::from_millis(100),
@@ -625,6 +801,8 @@ mod api_tests {
         Router::new()
             .route("/", get(index))
             .route("/healthz", get(healthz))
+            .route("/readyz", get(readyz))
+            .route("/metrics", get(metrics_ep))
             .route("/generate_204", get(generate_204))
             .route("/ip", get(ip))
             .route("/headers", get(headers_echo))
@@ -636,7 +814,16 @@ mod api_tests {
                 state.clone(),
                 rate_limit_mw,
             ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                concurrency_mw,
+            ))
+            .layer(axum::middleware::from_fn(timeout_mw))
             .layer(axum::middleware::from_fn(no_store_mw))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                metrics_mw,
+            ))
             .with_state(state)
     }
 
@@ -737,7 +924,9 @@ mod api_tests {
 
     #[tokio::test]
     async fn dynamic_endpoints_are_no_store() {
-        for path in ["/ip", "/headers", "/geo", "/type", "/healthz"] {
+        for path in [
+            "/ip", "/headers", "/geo", "/type", "/healthz", "/readyz", "/metrics",
+        ] {
             let res = test_app()
                 .oneshot(Request::get(path).body(Body::empty()).unwrap())
                 .await
@@ -757,6 +946,36 @@ mod api_tests {
             .await
             .unwrap();
         assert!(res.headers().get("cache-control").is_none());
+    }
+
+    #[tokio::test]
+    async fn metrics_and_readyz() {
+        let app = test_app();
+        let ready = app
+            .clone()
+            .oneshot(Request::get("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(ready.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(ready.into_body(), 65536)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["geo_ready"], false);
+
+        let metrics = app
+            .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(metrics.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(metrics.into_body(), 65536)
+            .await
+            .unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("proxpulse_requests_total"));
+        assert!(text.contains("proxpulse_build_info"));
+        assert!(text.contains("proxpulse_geo_ready 0"));
     }
 
     #[tokio::test]
@@ -902,6 +1121,8 @@ mod api_tests {
                 per_minute: 1_000_000,
                 hits: new_hits_cache(),
             }),
+            metrics: Arc::new(Metrics::default()),
+            concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY)),
             trust_proxy: true,
             trust_cf: true,
             rdns_timeout: Duration::from_millis(50),

@@ -81,6 +81,16 @@ fn open_first(dir: &Path, names: &[&str]) -> (Option<Reader<Vec<u8>>>, Option<St
     }
     for path in &candidates {
         if let Some(r) = try_open(path) {
+            let kind = r.metadata.database_type.to_ascii_lowercase();
+            if !kind.contains(pattern) {
+                warn!(
+                    "ignoring {}: database_type {:?} does not look like {}",
+                    path.display(),
+                    r.metadata.database_type,
+                    pattern
+                );
+                continue;
+            }
             let name = path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -138,40 +148,34 @@ impl GeoPool {
         };
         let mut found = false;
         if let Some(reader) = &self.city {
-            match reader.lookup::<Value>(addr) {
-                Ok(v) => {
-                    if !is_empty_record(&v) {
-                        apply_city(&v, &mut out);
-                        found = true;
-                    }
+            match lookup_value(reader, addr) {
+                Ok(Some(v)) if !is_empty_record(&v) => {
+                    apply_city(&v, &mut out);
+                    found = true;
                 }
-                Err(maxminddb::MaxMindDBError::AddressNotFoundError(_)) => {}
+                Ok(_) => {}
                 Err(e) => out.error = Some(format!("city: {}", short_err(&e.to_string()))),
             }
         }
         if !found {
             if let Some(reader) = &self.country {
-                match reader.lookup::<Value>(addr) {
-                    Ok(v) => {
-                        if !is_empty_record(&v) {
-                            apply_city(&v, &mut out);
-                            found = true;
-                        }
+                match lookup_value(reader, addr) {
+                    Ok(Some(v)) if !is_empty_record(&v) => {
+                        apply_city(&v, &mut out);
+                        found = true;
                     }
-                    Err(maxminddb::MaxMindDBError::AddressNotFoundError(_)) => {}
+                    Ok(_) => {}
                     Err(e) => out.error = Some(format!("country: {}", short_err(&e.to_string()))),
                 }
             }
         }
         if let Some(reader) = &self.asn {
-            match reader.lookup::<Value>(addr) {
-                Ok(v) => {
-                    if !is_empty_record(&v) {
-                        apply_asn(&v, &mut out);
-                        found = true;
-                    }
+            match lookup_value(reader, addr) {
+                Ok(Some(v)) if !is_empty_record(&v) => {
+                    apply_asn(&v, &mut out);
+                    found = true;
                 }
-                Err(maxminddb::MaxMindDBError::AddressNotFoundError(_)) => {}
+                Ok(_) => {}
                 Err(e) => out.error = Some(format!("asn: {}", short_err(&e.to_string()))),
             }
         }
@@ -189,6 +193,40 @@ impl GeoPool {
         }
         out
     }
+
+    /// Full structural validation of every loaded database. Expensive:
+    /// intended for `--check-geo` after downloads, not per request.
+    pub fn verify(&self) -> Result<(), String> {
+        let mut any = false;
+        for (kind, reader) in [
+            ("city", self.city.as_ref()),
+            ("country", self.country.as_ref()),
+            ("asn", self.asn.as_ref()),
+        ] {
+            if let Some(reader) = reader {
+                any = true;
+                reader
+                    .verify()
+                    .map_err(|e| format!("{kind}: {}", short_err(&e.to_string())))?;
+            }
+        }
+        if any {
+            Ok(())
+        } else {
+            Err("no geo databases loaded".to_string())
+        }
+    }
+}
+
+fn lookup_value(
+    reader: &Reader<Vec<u8>>,
+    addr: IpAddr,
+) -> Result<Option<Value>, maxminddb::MaxMindDbError> {
+    let result = reader.lookup(addr)?;
+    if !result.has_data() {
+        return Ok(None);
+    }
+    result.decode::<Value>()
 }
 
 fn short_err(e: &str) -> String {
@@ -374,5 +412,6 @@ mod tests {
         assert_eq!(info.error.as_deref(), Some("invalid ip"));
         let info2 = pool.lookup("8.8.8.8");
         assert_eq!(info2.error.as_deref(), Some("no db"));
+        assert!(pool.verify().is_err());
     }
 }

@@ -36,6 +36,16 @@ for EDITION in GeoLite2-City GeoLite2-ASN GeoLite2-Country; do
     echo "error: ${EDITION}.mmdb missing or empty in archive" >&2
     exit 1
   }
+
+  BIN="${JUDGE_BIN:-/app/proxpulse-judge}"
+  if [ -x "$BIN" ]; then
+    echo "== validating ${EDITION}"
+    if ! GEO_DIR="$TMP/${EDITION}" "$BIN" --check-geo; then
+      echo "error: ${EDITION}.mmdb failed validation" >&2
+      exit 1
+    fi
+  fi
+
   mv -f "$TMP/${EDITION}/${EDITION}.mmdb" "$DIR/${EDITION}.mmdb"
   chmod 0644 "$DIR/${EDITION}.mmdb"
   rm -f "$TAR"

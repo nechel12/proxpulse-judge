@@ -55,6 +55,18 @@ gunzip -c "$TMP/asn.gz" > "$TMP/dbip-asn-lite.mmdb"
   echo "error: downloaded DB is empty" >&2
   exit 1
 }
+
+# Full structural validation before replacing the files used by the
+# service. Skipped when the judge binary is not available (host-only run).
+BIN="${JUDGE_BIN:-/app/proxpulse-judge}"
+if [ -x "$BIN" ]; then
+  echo "== validating downloaded databases"
+  if ! GEO_DIR="$TMP" "$BIN" --check-geo; then
+    echo "error: downloaded DB failed validation" >&2
+    exit 1
+  fi
+fi
+
 mv -f "$TMP/dbip-city-lite.mmdb" "$DIR/dbip-city-lite.mmdb"
 mv -f "$TMP/dbip-asn-lite.mmdb" "$DIR/dbip-asn-lite.mmdb"
 chmod 0644 "$DIR/dbip-city-lite.mmdb" "$DIR/dbip-asn-lite.mmdb"
