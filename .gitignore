@@ -5,3 +5,4 @@ __pycache__/
 *.mmdb
 *.mmdb.gz
 .env
+/audit.md
