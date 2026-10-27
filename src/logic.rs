@@ -186,8 +186,7 @@ fn is_infra(name: &str, trust_cf: bool) -> bool {
     // deployment any client can send these names, so treating them as
     // infrastructure would hide real leaks.
     INFRA_HEADERS.contains(&n.as_str())
-        || n == "cdn-loop"
-        || (trust_cf && (n == "true-client-ip" || n.starts_with("cf-")))
+        || (trust_cf && (n == "cdn-loop" || n == "true-client-ip" || n.starts_with("cf-")))
 }
 
 fn is_telltale(name: &str, trust_cf: bool) -> bool {

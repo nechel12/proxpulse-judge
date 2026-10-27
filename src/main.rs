@@ -463,7 +463,7 @@ async fn no_store_mw(
 ) -> Response {
     let path = req.uri().path().to_string();
     let mut res = next.run(req).await;
-    if path != "/content" {
+    if path != "/content" || res.status() != StatusCode::OK {
         res.headers_mut()
             .insert("cache-control", HeaderValue::from_static("no-store"));
     }
