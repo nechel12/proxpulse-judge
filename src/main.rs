@@ -28,6 +28,7 @@ use geo::{GeoInfo, GeoPool};
 use logic::{anonymity_level, classify_ip, client_ip, forwarded_chain};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const REPOSITORY: &str = "https://github.com/nechel12/proxpulse-judge";
 
 /// Rolling 60s window for one key. 0 disables the limiter before this is
 /// called. Pure function for testability: returns Some(retry_after_secs)
@@ -225,6 +226,7 @@ async fn index(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "service": "proxpulse-judge",
         "version": VERSION,
+        "repository": REPOSITORY,
         "trust_proxy": s.trust_proxy,
         "trust_cf": s.trust_cf,
         "geo_sources": s.geo.sources(),
@@ -767,6 +769,7 @@ mod api_tests {
         let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["service"], "proxpulse-judge");
+        assert_eq!(v["repository"], REPOSITORY);
         assert_eq!(v["licenses"]["dbip_lite"]["license"], "CC BY 4.0");
         assert!(v["licenses"]["geolite2"]["url"]
             .as_str()
