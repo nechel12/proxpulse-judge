@@ -47,7 +47,7 @@ curl http://127.0.0.1:8000/judge
 docker pull ghcr.io/nechel12/proxpulse-judge:latest
 ```
 
-Теги — `:latest` и `:YYYYMM`. Образы рассчитаны на stateless-хостинг
+Теги — `:latest`, `:YYYYMM` и `:vX.Y.Z`. Образы рассчитаны на stateless-хостинг
 (Render и аналоги) и не содержат данных MaxMind. Для VPS со своими
 MaxMind/DB-IP файлами собери `Dockerfile` и смонтируй `./geo`, как описано
 ниже.
@@ -203,7 +203,9 @@ Cloudflare Tunnel в этом варианте не требуется: TLS и �
 | GET | `/type` | `{"ip", "ip_type", "signals"}` — тип IP с объяснением |
 | GET | `/content` | фиксированные байты — эталон целостности |
 | GET | `/judge?direct_ip=...` | всё сразу + `anonymity`, `content_sha256` |
-| GET | `/healthz` | `{"ok": true}` — для Docker |
+| GET | `/healthz` | `{"ok": true}` — liveness |
+| GET | `/readyz` | `{"ok", "geo_ready", "geo_sources"}` — readiness |
+| GET | `/metrics` | счётчики в формате Prometheus |
 
 Пример ответа `/judge` (сокращённо; заголовки и детали signals опущены):
 
@@ -331,6 +333,17 @@ mount); иначе в лог пишется warning и сервис старту
 | `RATE_LIMIT_PER_MINUTE` | `6000` | запросов с IP за скользящую минуту, `0` — без лимита |
 | `RUST_LOG` | `info` | уровень логов |
 
+## Мониторинг
+
+- `GET /healthz` — liveness.
+- `GET /readyz` — readiness плюс `geo_ready` и загруженные `geo_sources`.
+- `GET /metrics` — счётчики в формате Prometheus (запросы, 4xx/5xx,
+  rate-limit, rDNS, build info).
+
+Запрос ограничен 20 секундами и 512 одновременными запросами. Эндпоинты
+мониторинга исключены из rate/concurrency-лимитов; метрики живут в памяти
+процесса и сбрасываются при рестарте.
+
 ## Почему так, а не иначе
 
 - **Почему не Python/FastAPI.** Первая версия была на FastAPI — работала,
@@ -376,8 +389,11 @@ HTTP-порт на loopback, задайте rate-limit и настройте
 ## Разработка
 
 ```sh
-cargo test        # 49 тестов: логика, geo-парсинг, API, лимиты
+cargo test        # 50 тестов: логика, geo-парсинг, API, лимиты
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
+
+scripts/smoke.sh http://127.0.0.1:8000
+scripts/load.sh http://127.0.0.1:8000 300 32
 ```
 
 Структура: `src/main.rs` (HTTP), `src/geo.rs` (пул `.mmdb` + кэш),
@@ -396,7 +412,8 @@ PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
 [Кодексом поведения](CODE_OF_CONDUCT.md). Перед отправкой изменений прогони
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` и
 `cargo test`. Об уязвимостях сообщай через [SECURITY.md](SECURITY.md),
-а не в публичный issue.
+а не в публичный issue. Изменения — в [CHANGELOG.md](CHANGELOG.md);
+мейнтейнерам — [RELEASING.md](RELEASING.md).
 
 ## Лицензия
 

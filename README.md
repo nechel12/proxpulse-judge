@@ -47,7 +47,7 @@ Monthly CI publishes DB-IP Lite images to GHCR:
 docker pull ghcr.io/nechel12/proxpulse-judge:latest
 ```
 
-Tags are `:latest` and `:YYYYMM`. These images are intended for stateless
+Tags are `:latest`, `:YYYYMM`, and `:vX.Y.Z`. These images are intended for stateless
 hosts such as Render and do not contain MaxMind data. For a VPS with your own
 MaxMind/DB-IP files, build `Dockerfile` and mount `./geo` as described below.
 
@@ -203,7 +203,9 @@ passthrough and `/healthz` as the health check are required.
 | GET | `/type` | `{"ip", "ip_type", "signals"}` — IP type with reasoning |
 | GET | `/content` | fixed bytes — integrity reference |
 | GET | `/judge?direct_ip=...` | everything at once + `anonymity`, `content_sha256` |
-| GET | `/healthz` | `{"ok": true}` — for Docker |
+| GET | `/healthz` | `{"ok": true}` — liveness probe |
+| GET | `/readyz` | `{"ok", "geo_ready", "geo_sources"}` — readiness |
+| GET | `/metrics` | Prometheus text counters |
 
 Example `/judge` response (excerpt; headers and signal details omitted):
 
@@ -330,6 +332,17 @@ For running without Docker with logs in a file — example
 | `RATE_LIMIT_PER_MINUTE` | `6000` | requests per IP per rolling minute, `0` — no limit |
 | `RUST_LOG` | `info` | log level |
 
+## Monitoring
+
+- `GET /healthz` — liveness.
+- `GET /readyz` — readiness plus `geo_ready` and the loaded `geo_sources`.
+- `GET /metrics` — Prometheus text counters (requests, 4xx/5xx, rate limits,
+  rDNS, build info).
+
+A request is capped at 20 seconds and 512 concurrent requests. Monitoring
+endpoints are exempt from the rate and concurrency limits; metrics are
+process-local and reset on restart.
+
 ## Why it is the way it is
 
 - **Why not Python/FastAPI.** The first version was FastAPI — it worked,
@@ -375,8 +388,11 @@ IP/geo and the rate-limit key.
 ## Development
 
 ```sh
-cargo test        # 49 tests: logic, geo parsing, API, limits
+cargo test        # 50 tests: logic, geo parsing, API, limits
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
+
+scripts/smoke.sh http://127.0.0.1:8000
+scripts/load.sh http://127.0.0.1:8000 300 32
 ```
 
 Structure: `src/main.rs` (HTTP), `src/geo.rs` (`.mmdb` pool + cache),
@@ -395,7 +411,8 @@ for the development workflow. By participating, you agree to the
 [Code of Conduct](CODE_OF_CONDUCT.md). Before sending a change, run
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
 `cargo test`. Report security issues through [SECURITY.md](SECURITY.md), not a
-public issue.
+public issue. Release notes live in [CHANGELOG.md](CHANGELOG.md); maintainers
+can follow [RELEASING.md](RELEASING.md).
 
 ## License
 

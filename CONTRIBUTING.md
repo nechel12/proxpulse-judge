@@ -13,7 +13,8 @@ explain the behavior and tradeoffs in the PR description.
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-bash -n scripts/download-dbip.sh scripts/download-geolite2.sh scripts/docker-entrypoint.sh
+bash -n scripts/download-dbip.sh scripts/download-geolite2.sh \
+  scripts/docker-entrypoint.sh scripts/smoke.sh scripts/load.sh
 ```
 
 For Docker changes, build the affected image:
@@ -30,6 +31,9 @@ Run the service locally:
 
 ```sh
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
+
+bash scripts/smoke.sh http://127.0.0.1:8000
+bash scripts/load.sh http://127.0.0.1:8000 300 32
 ```
 
 ## Pull requests
@@ -37,12 +41,17 @@ PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
 - Add or update tests for logic and HTTP changes.
 - Update `README.md` and `README.ru.md` when behavior or configuration changes.
 - Do not commit secrets, `.env` files, database files, or build artifacts.
-- Keep CI green; the workflow runs formatting, clippy, and tests.
+- Keep CI green; the workflow runs formatting, clippy, tests, and a
+  container smoke/load check.
 
 ## Reporting security issues
 
 Follow [SECURITY.md](SECURITY.md). Do not open a public issue with exploit
 details.
+
+## Releases
+
+See [RELEASING.md](RELEASING.md) and [CHANGELOG.md](CHANGELOG.md).
 
 ## Conduct
 
