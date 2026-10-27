@@ -175,13 +175,13 @@ fn geo_cached(state: &AppState, ip: &str) -> GeoInfo {
     info
 }
 
-async fn rdns_lookup(ip: &str, timeout: Duration) -> Option<String> {
-    let addr: std::net::IpAddr = ip.parse().ok()?;
-    let fut = tokio::task::spawn_blocking(move || dns_lookup::lookup_addr(&addr).ok());
-    match tokio::time::timeout(timeout, fut).await {
-        Ok(Ok(v)) => v,
-        _ => None,
-    }
+/// parse `RDNS_TIMEOUT` without panicking on negative/NaN/overflowing
+/// values (Duration::from_secs_f64 panics for those).
+fn parse_rdns_timeout(raw: Option<&str>) -> Duration {
+    raw.and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .map(|v| Duration::from_secs_f64(v.min(60.0)))
+        .unwrap_or(Duration::from_secs_f64(1.5))
 }
 
 /// Server-side rDNS policy: resolve only when the ASN org is missing
@@ -196,10 +196,34 @@ async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<Str
     if let Some(hit) = state.ptr_cache.get(&key) {
         return hit;
     }
-    let _permit = state.rdns_sem.try_acquire().ok()?;
-    let res = rdns_lookup(ip, state.rdns_timeout).await;
-    state.ptr_cache.insert(key, res.clone());
-    res
+    // Keep the permit inside the blocking task: wrapping the JoinHandle
+    // in a timeout only stops waiting, not the resolver call. This bounds
+    // the number of real blocking lookups (and their threads) to the
+    // semaphore, even when callers give up early.
+    let permit = tokio::time::timeout(
+        Duration::from_millis(100),
+        state.rdns_sem.clone().acquire_owned(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let cache = state.ptr_cache.clone();
+    let key_for_task = key.clone();
+    let fut = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let res = key_for_task
+            .parse::<std::net::IpAddr>()
+            .ok()
+            .and_then(|addr| dns_lookup::lookup_addr(&addr).ok());
+        // Cache the eventual answer even if the request timed out: the
+        // next request should not repeat a slow/absent lookup.
+        cache.insert(key_for_task.clone(), res.clone());
+        res
+    });
+    match tokio::time::timeout(state.rdns_timeout, fut).await {
+        Ok(Ok(v)) => v,
+        _ => None,
+    }
 }
 
 async fn index(State(s): State<Arc<AppState>>) -> impl IntoResponse {
@@ -439,12 +463,7 @@ async fn main() {
     // CF headers are proxy headers too: without TRUST_PROXY the service
     // must resolve the IP from the socket, never from client headers.
     let trust_cf = trust_proxy && env::var("TRUST_CF").unwrap_or_else(|_| "0".to_string()) == "1";
-    let rdns_timeout = Duration::from_secs_f64(
-        env::var("RDNS_TIMEOUT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1.5),
-    );
+    let rdns_timeout = parse_rdns_timeout(env::var("RDNS_TIMEOUT").ok().as_deref());
     // requests per IP per rolling minute, 0 = off
     let rate_per_minute: u32 = env::var("RATE_LIMIT_PER_MINUTE")
         .ok()
@@ -532,6 +551,22 @@ mod api_tests {
                 rate_limit_mw,
             ))
             .with_state(state)
+    }
+
+    #[test]
+    fn rdns_timeout_parsing_is_panic_free() {
+        let default = Duration::from_secs_f64(1.5);
+        assert_eq!(parse_rdns_timeout(None), default);
+        assert_eq!(parse_rdns_timeout(Some("")), default);
+        assert_eq!(parse_rdns_timeout(Some("-1")), default);
+        assert_eq!(parse_rdns_timeout(Some("nan")), default);
+        assert_eq!(parse_rdns_timeout(Some("inf")), default);
+        assert_eq!(
+            parse_rdns_timeout(Some("2.5")),
+            Duration::from_secs_f64(2.5)
+        );
+        assert_eq!(parse_rdns_timeout(Some("0")), Duration::ZERO);
+        assert_eq!(parse_rdns_timeout(Some("1e9")), Duration::from_secs(60));
     }
 
     #[test]
