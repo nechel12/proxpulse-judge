@@ -15,9 +15,10 @@ IP выхода прокси, гео из **локальных** `.mmdb`, заг
 анализа анонимности и фиксированный контент для проверки целостности.
 
 Стек: **Rust + axum + tokio**, базы в ОЗУ, кэш лукапов. Без сторонних
-HTTP API; rate-limit настраивается (`RATE_LIMIT_PER_MINUTE`, по умолчанию
-6000/мин на IP). Сервис — один бинарь на `debian:slim`; в образ также
-входят `bash`, `curl` и `gzip` для опционального fallback-скачивания баз.
+HTTP API во время работы; rate-limit настраивается
+(`RATE_LIMIT_PER_MINUTE`, по умолчанию 6000/мин на IP). Сервис — один
+бинарь на `debian:slim`; в образ также входят `bash`, `curl` и `gzip`
+для опционального fallback-скачивания баз.
 
 > Статус: pre-1.0. Документированные HTTP-эндпоинты считаются стабильными,
 > но поведение может меняться в минорных релизах.
@@ -60,7 +61,11 @@ MaxMind/DB-IP файлами собери `Dockerfile` и смонтируй `./
 
 ```caddy
 check.yourdomain.com {
-    reverse_proxy 127.0.0.1:8000
+    reverse_proxy 127.0.0.1:8000 {
+        trusted_proxies 0.0.0.0/0 ::/0
+        header_up -CF-Connecting-IP
+        header_up -True-Client-IP
+    }
 }
 ```
 
@@ -77,6 +82,10 @@ curl https://check.yourdomain.com/healthz
 можно только потому, что judge слушает `127.0.0.1` и доступен лишь
 через Caddy. Для этого варианта `TRUST_CF` должен оставаться `0`
 (дефолт): Cloudflare здесь нет, а CF-заголовки легко подделать.
+
+Если Cloudflare стоит **перед** Caddy, не удаляй CF-заголовки: задай
+`trusted_proxies` диапазонами Cloudflare вместо `0.0.0.0/0`, оставь
+`TRUST_CF=1` и убедись, что `TRUST_PROXY=1`.
 
 ## Вариант Б — Cloudflare Tunnel (без Caddy и открытых портов)
 

@@ -15,9 +15,10 @@ the proxy exit IP, geo from **local** `.mmdb` files, request headers for
 anonymity analysis, and fixed content for tamper checks.
 
 Stack: **Rust + axum + tokio**, databases in RAM, lookup cache. No third-party
-HTTP APIs; a configurable rate limiter (`RATE_LIMIT_PER_MINUTE`, 6000/min per
-IP by default). The service is a single binary on `debian:slim`; the image
-also includes `bash`, `curl`, and `gzip` for the optional database fallback.
+HTTP APIs at runtime; a configurable rate limiter (`RATE_LIMIT_PER_MINUTE`,
+6000/min per IP by default). The service is a single binary on `debian:slim`;
+the image also includes `bash`, `curl`, and `gzip` for the optional database
+fallback.
 
 > Status: pre-1.0. The documented HTTP endpoints are intended to be stable,
 > but behavior may change in minor releases.
@@ -60,7 +61,11 @@ Example in `Caddyfile.example`:
 
 ```caddy
 check.yourdomain.com {
-    reverse_proxy 127.0.0.1:8000
+    reverse_proxy 127.0.0.1:8000 {
+        trusted_proxies 0.0.0.0/0 ::/0
+        header_up -CF-Connecting-IP
+        header_up -True-Client-IP
+    }
 }
 ```
 
@@ -77,6 +82,10 @@ would not see a real-IP leak passed via XFF. Trusting XFF from all clients is
 safe only because the judge listens on `127.0.0.1` and is reachable solely
 through Caddy. Keep `TRUST_CF=0` (the default) for this variant: there is no
 Cloudflare here, and CF headers are trivially forgeable.
+
+If Cloudflare sits **in front of** Caddy, do not strip the CF headers: set
+`trusted_proxies` to Cloudflare's ranges instead of `0.0.0.0/0`, keep
+`TRUST_CF=1`, and make sure `TRUST_PROXY=1`.
 
 ## Variant B — Cloudflare Tunnel (no Caddy, no open ports)
 
