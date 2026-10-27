@@ -133,9 +133,10 @@ ingress:
 > and in ingress/service use `http://proxpulse-judge:8000`.
 > cloudflared on the host itself simply goes to `http://127.0.0.1:8000`.
 
-Set `TRUST_CF=1` explicitly in this variant (the default is `0`, safe for
-Caddy/VPS): the service takes the real IP from `CF-Connecting-IP` (set by
-Cloudflare itself, takes priority over `X-Forwarded-For`), and all
+Set `TRUST_CF=1` explicitly in this variant and keep `TRUST_PROXY=1`;
+`TRUST_CF` defaults to `0`, which is safe for Caddy/VPS. The service takes
+the real IP from `CF-Connecting-IP` (set by Cloudflare itself, takes
+priority over `X-Forwarded-For`), and all
 `cf-*`/`cdn-loop` headers are excluded from anonymity detection — otherwise a
 direct check through the tunnel would give a false `transparent`. Check:
 
@@ -333,6 +334,16 @@ For running without Docker with logs in a file — example
 | `RATE_LIMIT_PER_MINUTE` | `6000` | requests per IP per rolling minute, `0` — no limit |
 | `RUST_LOG` | `info` | log level |
 
+With `TRUST_PROXY=1`, the client IP is taken from the **last**
+`X-Forwarded-For` entry. Caddy 2.5+ replaces the incoming XFF with the
+immediate client address by default; `Caddyfile.example` enables
+`trusted_proxies` to preserve the checked proxy's chain, so Caddy appends
+the client address at the end. nginx (`proxy_add_x_forwarded_for`) and
+Cloudflare append as well. Caddy's own `X-Forwarded-Proto`/`Host` headers
+are excluded from anonymity detection; otherwise everything behind a reverse
+proxy would look `anonymous`. With `TRUST_CF=1`, `CF-Connecting-IP` takes
+priority.
+
 ## Monitoring
 
 - `GET /healthz` — liveness.
@@ -343,26 +354,6 @@ For running without Docker with logs in a file — example
 A request is capped at 20 seconds and 512 concurrent requests. Monitoring
 endpoints are exempt from the rate and concurrency limits; metrics are
 process-local and reset on restart.
-
-## Why it is the way it is
-
-- **Why not Python/FastAPI.** The first version was FastAPI — it worked,
-  but Rust gives a single binary with no language runtime, a compact
-  `debian:slim` image, and no GIL: concurrent checks share one tokio thread
-  pool.
-- **Why IP from the end of XFF.** Caddy 2.5+ replaces the incoming
-  `X-Forwarded-For` with the immediate client address by default; to keep
-  the checked proxy's chain, `Caddyfile.example` enables `trusted_proxies`.
-  Caddy then appends the client address to the end, and only the last entry
-  is trustworthy. nginx (`proxy_add_x_forwarded_for`) and Cloudflare also
-  append. Caddy's own headers (`X-Forwarded-Proto/Host`) are excluded from
-  anonymity detection, otherwise everything behind a reverse proxy would
-  look «anonymous».
-- **Why IP type is a heuristic.** Local data cannot prove
-  residential-vs-business the way paid ASN DBs do. So the response carries
-  `signals` (which keywords matched and where) — you can see *why*.
-- **Why no TLS/JA3.** Caddy terminates TLS, the judge only sees HTTP.
-  Certificate comparison stays on the checker side (direct vs through proxy).
 
 ## Limitations
 

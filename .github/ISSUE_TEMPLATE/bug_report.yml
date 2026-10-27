@@ -14,7 +14,7 @@ body:
     attributes:
       label: Version or commit
       description: Output of `GET /` (`version`) or the commit SHA.
-      placeholder: "0.5.2 or abc1234"
+      placeholder: "e.g. 0.5.4 or abc1234"
     validations:
       required: true
 

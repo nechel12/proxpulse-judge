@@ -1,7 +1,4 @@
 /target/
-__pycache__/
-*.py[cod]
-.pytest_cache/
 *.mmdb
 *.mmdb.gz
 .env
