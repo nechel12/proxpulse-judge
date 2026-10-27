@@ -178,22 +178,21 @@ pub fn forwarded_chain(
     chain
 }
 
-fn is_infra(name: &str) -> bool {
+fn is_infra(name: &str, trust_cf: bool) -> bool {
     let n = name.to_ascii_lowercase();
     // Cloudflare edge headers: CF-Connecting-IP always equals the exit IP
-    // by construction, so it must never count as a leak or a telltale.
-    // Same for True-Client-IP: Render's Cloudflare config sends it on
-    // every request with the same value (seen live), and a direct check
-    // would otherwise misdetect as transparent.
+    // by construction, so it must never count as a leak or a telltale —
+    // but only when CF headers are actually trusted. On a plain Caddy/VPS
+    // deployment any client can send these names, so treating them as
+    // infrastructure would hide real leaks.
     INFRA_HEADERS.contains(&n.as_str())
-        || n.starts_with("cf-")
         || n == "cdn-loop"
-        || n == "true-client-ip"
+        || (trust_cf && (n == "true-client-ip" || n.starts_with("cf-")))
 }
 
-fn is_telltale(name: &str) -> bool {
+fn is_telltale(name: &str, trust_cf: bool) -> bool {
     let n = name.to_ascii_lowercase();
-    if is_infra(&n) {
+    if is_infra(&n, trust_cf) {
         return false;
     }
     matches!(
@@ -217,7 +216,11 @@ fn is_telltale(name: &str) -> bool {
 /// [`forwarded_chain`]). `direct_ip` — checker's own IP learned via a
 /// direct /ip call; without it leak detection is limited to
 /// multi-hop XFF chains.
-pub fn anonymity_level(headers: &HashMap<String, String>, direct_ip: Option<&str>) -> &'static str {
+pub fn anonymity_level(
+    headers: &HashMap<String, String>,
+    direct_ip: Option<&str>,
+    trust_cf: bool,
+) -> &'static str {
     let chain: Vec<String> = split_xff(headers.get("x-forwarded-for").map(|s| s.as_str()))
         .into_iter()
         .filter_map(|e| normalize_host(&e))
@@ -231,7 +234,7 @@ pub fn anonymity_level(headers: &HashMap<String, String>, direct_ip: Option<&str
         }
         if headers
             .iter()
-            .any(|(k, v)| k != "x-forwarded-for" && !is_infra(k) && ip_in_text(v, &d))
+            .any(|(k, v)| k != "x-forwarded-for" && !is_infra(k, trust_cf) && ip_in_text(v, &d))
         {
             return "transparent";
         }
@@ -243,7 +246,7 @@ pub fn anonymity_level(headers: &HashMap<String, String>, direct_ip: Option<&str
     if !chain.is_empty() {
         return "anonymous";
     }
-    if headers.keys().any(|k| is_telltale(k)) {
+    if headers.keys().any(|k| is_telltale(k, trust_cf)) {
         return "anonymous";
     }
     "elite"
@@ -543,8 +546,11 @@ mod tests {
         assert!(chain.is_empty());
         let mut for_analysis = h.clone();
         for_analysis.insert("x-forwarded-for".to_string(), chain.join(", "));
-        assert_eq!(anonymity_level(&for_analysis, Some("1.1.1.1")), "elite");
-        assert_eq!(anonymity_level(&for_analysis, None), "elite");
+        assert_eq!(
+            anonymity_level(&for_analysis, Some("1.1.1.1"), true),
+            "elite"
+        );
+        assert_eq!(anonymity_level(&for_analysis, None, true), "elite");
     }
 
     #[test]
@@ -558,34 +564,37 @@ mod tests {
             ("cf-ray", "abc123"),
             ("x-forwarded-for", ""),
         ]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "elite");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "elite");
     }
 
     #[test]
     fn elite_direct_behind_caddy() {
         assert_eq!(
-            anonymity_level(&map(&[("x-forwarded-for", "")]), Some("1.1.1.1")),
+            anonymity_level(&map(&[("x-forwarded-for", "")]), Some("1.1.1.1"), true),
             "elite"
         );
-        assert_eq!(anonymity_level(&map(&[("user-agent", "x")]), None), "elite");
+        assert_eq!(
+            anonymity_level(&map(&[("user-agent", "x")]), None, true),
+            "elite"
+        );
     }
 
     #[test]
     fn transparent_leak() {
         let h = map(&[("x-forwarded-for", "1.1.1.1"), ("user-agent", "x")]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "transparent");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "transparent");
     }
 
     #[test]
     fn anonymous_forwarded_no_leak() {
         let h = map(&[("x-forwarded-for", "9.9.9.9"), ("user-agent", "x")]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "anonymous");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "anonymous");
     }
 
     #[test]
     fn anonymous_via() {
         assert_eq!(
-            anonymity_level(&map(&[("via", "1.0 proxy")]), Some("1.1.1.1")),
+            anonymity_level(&map(&[("via", "1.0 proxy")]), Some("1.1.1.1"), true),
             "anonymous"
         );
     }
@@ -596,7 +605,7 @@ mod tests {
             ("x-forwarded-proto", "https"),
             ("x-forwarded-host", "check.x"),
         ]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "elite");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "elite");
     }
 
     #[test]
@@ -610,7 +619,7 @@ mod tests {
             ("cdn-loop", "cloudflare"),
             ("x-forwarded-for", ""),
         ]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "elite");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "elite");
     }
 
     #[test]
@@ -620,7 +629,20 @@ mod tests {
             ("cf-connecting-ip", "5.6.7.8"),
             ("x-forwarded-for", "1.1.1.1"),
         ]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1")), "transparent");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "transparent");
+    }
+
+    #[test]
+    fn true_client_ip_is_a_leak_without_trust_cf() {
+        let h = map(&[("true-client-ip", "1.1.1.1"), ("x-forwarded-for", "")]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), false), "transparent");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "elite");
+    }
+
+    #[test]
+    fn cf_header_is_a_leak_without_trust_cf() {
+        let h = map(&[("cf-connecting-ip", "1.1.1.1"), ("x-forwarded-for", "")]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), false), "transparent");
     }
 
     #[test]
@@ -693,23 +715,26 @@ mod tests {
     #[test]
     fn prefix_is_not_a_leak() {
         let h = map(&[("x-forwarded-for", "1.2.3.40")]);
-        assert_eq!(anonymity_level(&h, Some("1.2.3.4")), "anonymous");
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "anonymous");
         let h = map(&[("user-agent", "Mozilla 1.2.3.40")]);
-        assert_eq!(anonymity_level(&h, Some("1.2.3.4")), "elite");
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "elite");
     }
 
     #[test]
     fn header_value_exact_ip_is_a_leak() {
         let h = map(&[("referer", "https://x/?ip=1.2.3.4&y=1")]);
-        assert_eq!(anonymity_level(&h, Some("1.2.3.4")), "transparent");
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "transparent");
     }
 
     #[test]
     fn ipv6_forms_are_normalized() {
         let h = map(&[("x-forwarded-for", "2001:0db8:0:0:0:0:0:1")]);
-        assert_eq!(anonymity_level(&h, Some("2001:db8::1")), "transparent");
+        assert_eq!(
+            anonymity_level(&h, Some("2001:db8::1"), true),
+            "transparent"
+        );
         let h = map(&[("x-forwarded-for", "2001:db8::10")]);
-        assert_eq!(anonymity_level(&h, Some("2001:db8::1")), "anonymous");
+        assert_eq!(anonymity_level(&h, Some("2001:db8::1"), true), "anonymous");
     }
 
     #[test]

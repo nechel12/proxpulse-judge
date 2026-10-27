@@ -348,7 +348,7 @@ async fn judge(
             .filter(|d| !d.is_empty())
             .and_then(|d| d.parse::<std::net::IpAddr>().ok())
             .map(|ip| ip.to_string());
-        anonymity_level(&for_analysis, direct.as_deref())
+        anonymity_level(&for_analysis, direct.as_deref(), s.trust_cf)
     };
 
     let g = geo_cached(&s, &me);
