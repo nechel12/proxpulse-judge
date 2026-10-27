@@ -8,6 +8,7 @@
 [![Rust](https://img.shields.io/badge/backend-Rust-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 [![GHCR](https://img.shields.io/badge/ghcr.io-proxpulse--judge-2496ED?logo=docker&logoColor=white)](https://github.com/nechel12/proxpulse-judge/pkgs/container/proxpulse-judge)
 [![Security policy](https://img.shields.io/badge/security-policy-green)](SECURITY.md)
+[![CodeQL](https://github.com/nechel12/proxpulse-judge/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/nechel12/proxpulse-judge/security/code-scanning)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 Self-hosted backend для проверки прокси. Один запрос `GET /judge` возвращает
