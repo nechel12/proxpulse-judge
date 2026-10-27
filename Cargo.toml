@@ -16,7 +16,7 @@ axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-maxminddb = "0.24"
+maxminddb = "0.32"
 moka = { version = "0.12", features = ["sync"] }
 dns-lookup = "2"
 sha2 = "0.10"
