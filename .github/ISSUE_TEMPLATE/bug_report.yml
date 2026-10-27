@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a reproducible bug
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please remove secrets, real proxy credentials,
+        and personal data before posting.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Output of `GET /` (`version`) or the commit SHA.
+      placeholder: "0.5.2 or abc1234"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Caddy
+        - Cloudflare Tunnel
+        - Render
+        - Direct (no proxy)
+        - Docker Compose
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Include the relevant endpoint and response.
+      placeholder: "GET /judge returned ..., expected ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal steps or a curl command.
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or context
+      description: Relevant logs without secrets, IPs, or proxy credentials.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I removed secrets, real proxy credentials, and personal data.
+          required: true
+        - label: I checked the README and existing issues.
+          required: true

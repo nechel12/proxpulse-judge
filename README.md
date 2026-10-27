@@ -1,39 +1,62 @@
 # ProxPulse Judge
 
-[![License](https://img.shields.io/github/license/nechel12/proxpulse-judge)](LICENSE) [![Last commit](https://img.shields.io/github/last-commit/nechel12/proxpulse-judge)](https://github.com/nechel12/proxpulse-judge/commits/main) ![Rust](https://img.shields.io/badge/backend-Rust-orange?logo=rust&logoColor=white)
+**English** | [Русский](README.ru.md)
 
-*([English version](README_EN.md))*
+[![CI](https://github.com/nechel12/proxpulse-judge/actions/workflows/docker.yml/badge.svg?branch=main)](https://github.com/nechel12/proxpulse-judge/actions/workflows/docker.yml)
+[![License](https://img.shields.io/github/license/nechel12/proxpulse-judge)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/nechel12/proxpulse-judge)](https://github.com/nechel12/proxpulse-judge/commits/main)
+[![Rust](https://img.shields.io/badge/backend-Rust-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![GHCR](https://img.shields.io/badge/ghcr.io-proxpulse--judge-2496ED?logo=docker&logoColor=white)](https://github.com/nechel12/proxpulse-judge/pkgs/container/proxpulse-judge)
+[![Security policy](https://img.shields.io/badge/security-policy-green)](SECURITY.md)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
-Self-hosted backend для проверки прокси. Один запрос `GET /judge` заменяет
-пачку внешних сервисов (ip-api, httpbin): видит IP выхода прокси, резолвит
-гео в **локальных** `.mmdb`, отдаёт эхо заголовков для детекта анонимности
-и фиксированный контент для проверки целостности.
+Self-hosted backend for proxy checking. A single `GET /judge` request returns
+the proxy exit IP, geo from **local** `.mmdb` files, request headers for
+anonymity analysis, and fixed content for tamper checks.
 
-Стек: **Rust + axum + tokio**, базы в ОЗУ, кэш лукапов. Никаких внешних
-API; встроенный rate-limit настраивается (`RATE_LIMIT_PER_MINUTE`, по
-умолчанию 6000/мин на IP). Один бинарь без рантайма в `debian:slim`.
+Stack: **Rust + axum + tokio**, databases in RAM, lookup cache. No third-party
+HTTP APIs; a configurable rate limiter (`RATE_LIMIT_PER_MINUTE`, 6000/min per
+IP by default). The service is a single binary on `debian:slim`; the image
+also includes `bash`, `curl`, and `gzip` for the optional database fallback.
 
-## Быстрый старт
+> Status: pre-1.0. The documented HTTP endpoints are intended to be stable,
+> but behavior may change in minor releases.
 
-Нужны [Docker](https://docs.docker.com/get-docker/) с Compose и `bash`
-(скрипт скачивания баз). Для разработки без Docker — [Rust](https://rustup.rs/).
+## Quickstart
+
+Requires [Docker](https://docs.docker.com/get-docker/) with Compose, plus
+`bash`, `curl`, and `gzip` for the database download script. For Docker-free
+development, use [Rust](https://rustup.rs/) stable.
 
 ```sh
 git clone https://github.com/nechel12/proxpulse-judge.git
 cd proxpulse-judge
-bash scripts/download-dbip.sh   # качает City + ASN без ключей
+bash scripts/download-dbip.sh   # downloads City + ASN, no keys needed
 cp .env.example .env
 docker compose up -d --build
 
 curl http://127.0.0.1:8000/judge
 ```
 
-## Вариант А — Caddy (реверс-прокси)
+### Prebuilt image
 
-Нужен **свой домен** (без него не выпустить HTTPS-сертификат).
-Поддомен — любой, например `check.yourdomain.com`:
-в DNS-панели регистратора создай **A-запись** поддомена на IP сервера,
-порты **80 и 443** должны смотреть наружу. Пример в `Caddyfile.example`:
+Monthly CI publishes DB-IP Lite images to GHCR:
+
+```sh
+docker pull ghcr.io/nechel12/proxpulse-judge:latest
+```
+
+Tags are `:latest` and `:YYYYMM`. These images are intended for stateless
+hosts such as Render and do not contain MaxMind data. For a VPS with your own
+MaxMind/DB-IP files, build `Dockerfile` and mount `./geo` as described below.
+
+## Variant A — Caddy (reverse proxy)
+
+You need **your own domain** (no HTTPS certificate without one).
+The subdomain can be anything, e.g. `check.yourdomain.com`:
+in your registrar's DNS panel create an **A-record** for the subdomain
+pointing at the server IP; ports **80 and 443** must face the internet.
+Example in `Caddyfile.example`:
 
 ```caddy
 check.yourdomain.com {
@@ -41,32 +64,32 @@ check.yourdomain.com {
 }
 ```
 
-Caddy сам выпустит сертификат Let's Encrypt при первом обращении.
-Проверка:
+Caddy issues a Let's Encrypt certificate automatically on first request.
+Check:
 
 ```sh
 curl https://check.yourdomain.com/healthz
 ```
 
-`Caddyfile.example` включает `trusted_proxies`: с Caddy 2.5+ без этого
-входящий `X-Forwarded-For` проверяемого прокси отбрасывается, и judge
-не увидит утечку реального IP через XFF. Доверять XFF всем клиентам
-можно только потому, что judge слушает `127.0.0.1` и доступен лишь
-через Caddy. Для этого варианта `TRUST_CF` должен оставаться `0`
-(дефолт): Cloudflare здесь нет, а CF-заголовки легко подделать.
+`Caddyfile.example` enables `trusted_proxies`: since Caddy 2.5 the incoming
+`X-Forwarded-For` from the checked proxy is dropped by default, so the judge
+would not see a real-IP leak passed via XFF. Trusting XFF from all clients is
+safe only because the judge listens on `127.0.0.1` and is reachable solely
+through Caddy. Keep `TRUST_CF=0` (the default) for this variant: there is no
+Cloudflare here, and CF headers are trivially forgeable.
 
-## Вариант Б — Cloudflare Tunnel (без Caddy и открытых портов)
+## Variant B — Cloudflare Tunnel (no Caddy, no open ports)
 
 ```sh
 cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
-или вообще без команд в конфигах — через сайт Cloudflare:
-**Zero Trust → Networks → Tunnels → Create a tunnel**, задай имя,
-на вкладке **Public Hostname** добавь: subdomain `check`, domain твой,
-service `http://proxpulse-judge:8000` (контейнер в общей сети, см. ниже)
-или `http://127.0.0.1:8000` (cloudflared на хосте). Токен из сайта
-передай в контейнер коннектора:
+or no config-file commands at all — via the Cloudflare website:
+**Zero Trust → Networks → Tunnels → Create a tunnel**, pick a name,
+on the **Public Hostname** tab add: subdomain `check`, your domain,
+service `http://proxpulse-judge:8000` (container on the shared network, see below)
+or `http://127.0.0.1:8000` (cloudflared on the host). Pass the token from
+the website into the connector container:
 
 ```sh
 docker run -d --name cf-tunnel --restart unless-stopped \
@@ -74,7 +97,7 @@ docker run -d --name cf-tunnel --restart unless-stopped \
   cloudflare/cloudflared:latest tunnel --no-autoupdate run --token <TOKEN>
 ```
 
-или именованный туннель с DNS на `check.yourdomain.com` и ingress:
+or a named tunnel with DNS on `check.yourdomain.com` and ingress:
 
 ```yaml
 tunnel: <id>
@@ -85,94 +108,95 @@ ingress:
   - service: http_status:404
 ```
 
-> Важно, если cloudflared крутится **в docker**: `localhost` внутри его
-> контейнера — это он сам, а имя `proxpulse-judge` видно только в общей
-> сети. Поэтому контейнер туннеля должен сидеть в одной сети с judge —
-> сеть `proxpulse-net` из `docker-compose.yml` создаётся автоматически:
+> Important: if cloudflared runs **in docker**, `localhost` inside its
+> container is itself, and the name `proxpulse-judge` is only visible on the
+> shared network. So the tunnel container must sit on the same network as
+> judge — the `proxpulse-net` network from `docker-compose.yml` is created
+> automatically:
 >
 > ```sh
 > docker network connect proxpulse-net cf-tunnel
 > docker network inspect proxpulse-net --format '{{range .Containers}}{{.Name}} {{end}}'
-> # должны быть видны оба: proxpulse-judge и cf-tunnel
+> # both must be visible: proxpulse-judge and cf-tunnel
 > ```
 >
-> и в ingress/service тогда `http://proxpulse-judge:8000`.
-> cloudflared на самом хосте ходит просто на `http://127.0.0.1:8000`.
+> and in ingress/service use `http://proxpulse-judge:8000`.
+> cloudflared on the host itself simply goes to `http://127.0.0.1:8000`.
 
-В этом варианте нужно явно выставить `TRUST_CF=1` (дефолт `0` —
-безопасный для Caddy/VPS): сервис возьмёт реальный IP из
-`CF-Connecting-IP` (его ставит сам Cloudflare, приоритет выше
-`X-Forwarded-For`), а все `cf-*`/`cdn-loop` заголовки исключаются из
-детекта анонимности — иначе прямая проверка через туннель давала бы
-ложный `transparent`. Проверка:
+Set `TRUST_CF=1` explicitly in this variant (the default is `0`, safe for
+Caddy/VPS): the service takes the real IP from `CF-Connecting-IP` (set by
+Cloudflare itself, takes priority over `X-Forwarded-For`), and all
+`cf-*`/`cdn-loop` headers are excluded from anonymity detection — otherwise a
+direct check through the tunnel would give a false `transparent`. Check:
 
 ```sh
 MYIP=$(curl -s https://api.ipify.org)
 curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
-# ждём "anonymity":"elite"
+# expect "anonymity":"elite"
 ```
 
-## Вариант В — Render (бесплатный хостинг, без VPS)
+## Variant C — Render (free hosting, no VPS)
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/nechel12/proxpulse-judge)
 
-Готовый образ со вшитыми DB-IP Lite собирается сам каждый месяц
+A ready image with embedded DB-IP Lite rebuilds itself every month
 (`.github/workflows/docker.yml` → `ghcr.io/nechel12/proxpulse-judge:latest`),
-диск не нужен. Кнопка создаёт сервис по `render.yaml` с бесплатным доменом
-`https://<имя>.onrender.com`. Полученный URL указывается в чекере.
-Cloudflare Tunnel в этом варианте не требуется: TLS и домен
-предоставляет Render.
+no disk needed. The button creates the service from `render.yaml` with
+a free `https://<name>.onrender.com` domain. Use the resulting URL in
+the checker. No Cloudflare Tunnel is needed in this setup: Render
+provides both TLS and the domain.
 
-Что надо знать про free-план:
+Free-plan notes:
 
-- Сервис засыпает после 15 минут без трафика, пробуждение занимает
-  около минуты. Первая проверка после простоя может частично завершиться
-  по таймауту — достаточно повторить её. Один сервис примерно соответствует
-  лимиту бесплатных 750 ч/мес.
-- Файловая система эфемерна, но это не страшно: базы вшиты в образ.
-- `TRUST_CF=1` обязателен (трафик Render проходит через Cloudflare,
-  реальный IP извлекается из `CF-Connecting-IP`) — значение уже задано
-  в `render.yaml`. Переменная `PORT` задаётся самим Render и не должна
-  переопределяться.
-- В образе только DB-IP Lite: MaxMind по лицензии нельзя раздавать
-  в публичном образе. Хочешь MaxMind — это вариант с VPS + volume выше.
+- The service sleeps after 15 minutes without traffic; waking up takes
+  about a minute. The first check after idle may partially fail on
+  timeouts — repeating it is sufficient. A single service approximately
+  matches the free 750 h/month allowance.
+- The filesystem is ephemeral, but that is fine: the databases are
+  baked into the image.
+- `TRUST_CF=1` is required (Render traffic passes through Cloudflare;
+  the real IP is taken from `CF-Connecting-IP`) — it is already set in
+  `render.yaml`. The `PORT` variable is provided by Render and must not
+  be overridden.
+- The image carries DB-IP Lite only: the GeoLite2 EULA restricts public
+  redistribution, so MaxMind data is not baked into the published image. For
+  MaxMind, use the VPS + volume variant above.
 
-Обновление баз (образ пересобирается 3-го числа каждого месяца):
+Database updates (the image rebuilds on the 3rd of every month):
 
-1. **Форк + автохук.** Создайте форк репозитория, включите workflows
-   во вкладке Actions форка (по умолчанию отключены), добавьте секрет
-   `RENDER_DEPLOY_HOOK` (Render dashboard → сервис → Settings →
-   Deploy Hook), а в `render.yaml` форка укажите собственный образ
-   `ghcr.io/<владелец>/proxpulse-judge:latest`. После этого свежие образы
-   публикуются в GHCR форка и автоматически запускают редеплой.
-   Ограничение: расписание отключается после 60 дней без активности
-   в форке — периодически запускайте workflow вручную (Run workflow).
-2. **Вручную.** Render dashboard → сервис → Manual Deploy →
-   Deploy latest reference. Геоданные меняются медленно, поэтому
-   ручного обновления обычно достаточно.
-3. **Собственный планировщик без форка.** Сервис может использовать
-   `ghcr.io/nechel12/proxpulse-judge:latest` напрямую, а deploy hook —
-   вызываться раз в месяц любым внешним планировщиком (собственный
-   сервер, cron-job.org и т.п.).
+1. **Fork + auto-hook.** Fork the repository, enable workflows in the
+   fork's Actions tab (disabled by default), add a `RENDER_DEPLOY_HOOK`
+   secret (Render dashboard → service → Settings → Deploy Hook), and point
+   the fork's `render.yaml` at your own
+   `ghcr.io/<owner>/proxpulse-judge:latest`. Fresh images are then published
+   to the fork's GHCR and trigger redeploys automatically. Limitation: the
+   schedule is disabled after 60 days without activity in the fork — run
+   the workflow manually from time to time (Run workflow).
+2. **Manually.** Render dashboard → service → Manual Deploy →
+   Deploy latest reference. Geo data changes slowly, so manual updates
+   are usually sufficient.
+3. **Own scheduler, no fork.** The service can track
+   `ghcr.io/nechel12/proxpulse-judge:latest` directly while any external
+   scheduler (own server, cron-job.org, etc.) calls the deploy hook monthly.
 
-Образ совместим с другими хостингами контейнеров: требуются проброс
-`$PORT` и `/healthz` в качестве health-check.
+The image is compatible with other container hostings: `$PORT`
+passthrough and `/healthz` as the health check are required.
 
-## Эндпоинты
+## Endpoints
 
-| Метод | Путь | Назначение |
+| Method | Path | Purpose |
 |---|---|---|
-| GET | `/` | сервис, версия, источники гео, лицензии |
-| GET | `/generate_204` | `204` пусто — быстрая проверка живости |
-| GET | `/ip` | `{"ip": "..."}` — IP выхода |
-| GET | `/headers` | `{"ip", "headers", "xff_chain"}` — эхо заголовков |
-| GET | `/geo` | `{"ip", "geo", "source", "attribution"}` — страна/город/ASN из локальных баз |
-| GET | `/type` | `{"ip", "ip_type", "signals"}` — тип IP с объяснением |
-| GET | `/content` | фиксированные байты — эталон целостности |
-| GET | `/judge?direct_ip=...` | всё сразу + `anonymity`, `content_sha256` |
-| GET | `/healthz` | `{"ok": true}` — для Docker |
+| GET | `/` | service, version, repository, geo sources, licenses |
+| GET | `/generate_204` | `204` empty — cheap liveness check |
+| GET | `/ip` | `{"ip": "..."}` — exit IP |
+| GET | `/headers` | `{"ip", "headers", "xff_chain"}` — header echo |
+| GET | `/geo` | `{"ip", "geo", "source", "attribution"}` — country/city/ASN from local DBs |
+| GET | `/type` | `{"ip", "ip_type", "signals"}` — IP type with reasoning |
+| GET | `/content` | fixed bytes — integrity reference |
+| GET | `/judge?direct_ip=...` | everything at once + `anonymity`, `content_sha256` |
+| GET | `/healthz` | `{"ok": true}` — for Docker |
 
-Пример ответа `/judge`:
+Example `/judge` response (excerpt; headers and signal details omitted):
 
 ```json
 {
@@ -184,96 +208,94 @@ Cloudflare Tunnel в этом варианте не требуется: TLS и �
 }
 ```
 
-## Как пользоваться из чекера
+## Using it from the checker
 
-1. Прямой запрос `GET /ip` — свой IP (`direct_ip`).
-2. `GET /judge?direct_ip=<свой>` через прокси — поле `anonymity`:
-   `elite` (ничего не палит), `anonymous` (видно что прокси, IP скрыт),
-   `transparent` (утёк реальный IP).
-3. Целостность: `GET /content` напрямую и через прокси, сравнить байты
-   (или `content_sha256` из `/judge`).
-4. Гео и тип уже лежат в `/judge`. Отдельного параметра для rDNS нет:
-   сервер сам резолвит PTR, только когда ASN-орга отсутствует (иначе это
-   ничего не меняет), не больше 16 резолвов параллельно, ответы кэшируются
-   на час.
-5. Для живой проверки достаточно `GET /generate_204` (пустой 204, самый
-   дешёвый запрос).
+1. Direct `GET /ip` request — your own IP (`direct_ip`).
+2. `GET /judge?direct_ip=<yours>` through a proxy — the `anonymity` field:
+   `elite` (leaks nothing), `anonymous` (proxy visible, IP hidden),
+   `transparent` (real IP leaked).
+3. Integrity: `GET /content` directly and through the proxy, compare bytes
+   (or `content_sha256` from `/judge`).
+4. Geo and type are already inside `/judge`. There is no rDNS parameter:
+   the server resolves PTR itself, only when the ASN org is unknown (otherwise
+   it changes nothing), at most 16 resolutions in parallel, answers cached
+   for an hour.
+5. A liveness check is just `GET /generate_204` (empty 204, the cheapest request).
 
-## Публичные инстансы
+## Public instances
 
-Основной инстанс — **https://proxycheck.lmtunnel.com**: включён
-в чекер по умолчанию. На нём настроен лимит 1000 запросов в минуту
-с одного IP (при превышении — 429 + `Retry-After`; дефолт в конфиге —
-6000, см. таблицу ниже).
+These are shared, best-effort instances without an availability guarantee.
+For regular measurements, host your own (variants A–C above).
 
-Запасной инстанс — **https://proxpulse-judge.onrender.com**
-(бесплатный хостинг Render, базы DB-IP Lite, образ обновляется каждый
-месяц). Особенности free-плана: сервис засыпает после 15 минут без
-трафика (пробуждение около минуты) и ограничен примерно 750 часами
-в месяц — в конце месяца может быть недоступен до обновления квоты.
-Для регулярных проверок используйте основной инстанс или поднимите
-свой (варианты А–В выше).
+- **https://proxycheck.lmtunnel.com** — enabled in the checker by default.
+  Configured with a 1000 requests per minute per IP limit (429 +
+  `Retry-After` on exceed; the code default is 6000, see the table below).
+- **https://proxpulse-judge.onrender.com** — free Render hosting, DB-IP Lite
+  databases, image refreshed monthly. The free plan sleeps after 15 minutes
+  without traffic (waking up takes about a minute) and is limited to roughly
+  750 hours per month, so it may be unavailable near the end of the month
+  until the quota resets.
 
-Просьба держать нагрузку в разумных пределах: reverse-DNS выполняется
-сервером только при неизвестной ASN-орге, отдельных запросов от клиента
-не требуется.
+Please keep load reasonable: reverse-DNS is done by the server itself and only
+for unknown ASN orgs; no client-side requests are needed.
 
-## Базы
+## Databases
 
-Каталог `./geo` монтируется в контейнер read-only. Сервис сам находит файлы:
+The `./geo` directory is mounted into the container read-only. The service
+finds files by itself:
 
-- `GeoLite2-City.mmdb` или `dbip-city-lite.mmdb`
-- `GeoLite2-ASN.mmdb` или `dbip-asn-lite.mmdb`
-- `GeoLite2-Country.mmdb` — фолбэк, если нет City
+- `GeoLite2-City.mmdb` or `dbip-city-lite.mmdb`
+- `GeoLite2-ASN.mmdb` or `dbip-asn-lite.mmdb`
+- `GeoLite2-Country.mmdb` — fallback if there is no City
 
-Без файлов гео-поля будут пустыми (`"error": "no db"`), тип обычно
-остаётся `unknown` (rDNS иногда даёт подсказку), остальное работает.
+Without files, geo fields come back empty (`"error": "no db"`); the type
+is usually `unknown` (rDNS may still provide a hint); everything else
+works.
 
-### Лицензии баз (важно)
+### Database licenses (important)
 
-Сами файлы в репозиторий не входят — они скачиваются отдельно,
-и у каждой базы свои условия:
+The files themselves are not in the repository — you download them, and each
+database has its own terms:
 
 - **DB-IP Lite** — [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-  Обязательно указание авторства — ссылка `IP Geolocation by DB-IP`
-  на <https://db-ip.com> там, где показываются результаты из базы.
-  Обновляются **раз в месяц**. Подробнее: <https://db-ip.com/db/lite.php>
-- **MaxMind GeoLite2** (City / ASN / Country) — нужны бесплатный аккаунт
-  и ключ. Использование регулируется
-  [GeoLite EULA](https://www.maxmind.com/en/geolite/eula) (включает аспекты
-  [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)).
-  Обязательно указание авторства: `This product includes GeoLite2 Data
+  Attribution is required — an `IP Geolocation by DB-IP` link
+  to <https://db-ip.com> wherever results from the database are shown.
+  Updated **monthly**. Details: <https://db-ip.com/db/lite.php>
+- **MaxMind GeoLite2** (City / ASN / Country) — needs a free account
+  and key. Usage is governed by the
+  [GeoLite EULA](https://www.maxmind.com/en/geolite/eula) (incorporates aspects
+  of [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)).
+  Attribution is required: `This product includes GeoLite2 Data
   created by MaxMind, available from https://www.maxmind.com`.
 
-### Базы сами обновляются? Нет
+### Do databases update themselves? No
 
-`scripts/download-dbip.sh` (без ключей) или `scripts/download-geolite2.sh`
-(нужен `MAXMIND_LICENSE_KEY` из бесплатного аккаунта) — ручные: скачал →
-файлы легли в `./geo` → **перезапусти контейнер** (гео-кэш живёт в памяти,
-без рестарта новые файлы не подхватятся). Для автоматизации — cron
-раз в месяц + рестарт:
+`scripts/download-dbip.sh` (no keys) or `scripts/download-geolite2.sh`
+(needs `MAXMIND_LICENSE_KEY` from a free account) are manual: download →
+files land in `./geo` → **restart the container** (the geo cache lives in
+memory, new files are not picked up without a restart). For automation —
+monthly cron + restart:
 
 ```cron
 0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
 ```
 
-В docker-compose каталог `./geo` смонтирован **read-only**, поэтому
-entrypoint не может туда писать: для compose базы скачиваются на хосте
-(`bash scripts/download-dbip.sh`) или используются образы с вшитыми
-базами (Render). Автоскачивание в entrypoint работает, только если
-`GEO_DIR` доступен на запись (например, `docker run` без read-only
-mount); иначе в лог пишется warning и сервис стартует без гео.
-Собственные файлы (MaxMind или DB-IP) имеют приоритет — фолбэк
-срабатывает только когда валидных `.mmdb` нет.
+`docker-compose` mounts `./geo` **read-only**, so the entrypoint cannot
+write there: for compose, download the databases on the host
+(`bash scripts/download-dbip.sh`) or use an image with baked databases
+(Render). The entrypoint fallback only works when `GEO_DIR` is writable
+(e.g. `docker run` without a read-only mount); otherwise it logs a warning
+and starts without geo. Custom files (MaxMind or DB-IP) take precedence —
+the fallback only fires when no valid `.mmdb` is present.
 
-## Обслуживание: логи
+## Maintenance: logs
 
-Сервис пишет логи в stdout. Драйвер Docker `json-file` по умолчанию
-хранит их без ограничения размера, поэтому в `docker-compose.yml`
-заданы лимиты (`max-size: 10m`, `max-file: 3` — до ~30 МБ на контейнер).
-При запуске через compose дополнительная настройка не требуется.
+The service logs to stdout. Docker's `json-file` driver stores them with no
+size limit by default, so `docker-compose.yml` sets limits (`max-size: 10m`,
+`max-file: 3` — up to ~30 MB per container). With a compose setup no further
+configuration is needed.
 
-Для запуска без Docker с логами в файл — пример
+For running without Docker with logs in a file — example
 `/etc/logrotate.d/proxpulse-judge`:
 
 ```
@@ -287,57 +309,88 @@ mount); иначе в лог пишется warning и сервис старту
 }
 ```
 
-## Конфигурация
+## Configuration
 
-| Переменная | По умолчанию | Смысл |
+| Variable | Default | Meaning |
 |---|---|---|
-| `PORT` | `8000` | порт HTTP |
-| `GEO_DIR` | `/app/geo` | каталог `.mmdb` |
-| `TRUST_PROXY` | `1` | `1` — за реверс-прокси (IP из конца `X-Forwarded-For`), `0` — напрямую (IP из сокета, заголовки не доверяем) |
-| `TRUST_CF` | `0` | `1` — верить `CF-Connecting-IP`; только за Cloudflare/Tunnel и только вместе с `TRUST_PROXY=1`. `0` — игнорировать (безопасно для Caddy/VPS) |
-| `RDNS_TIMEOUT` | `1.5` | таймаут серверного rDNS, сек |
-| `RATE_LIMIT_PER_MINUTE` | `6000` | запросов с IP за скользящую минуту, `0` — без лимита |
-| `RUST_LOG` | `info` | уровень логов |
+| `PORT` | `8000` | HTTP port |
+| `GEO_DIR` | `/app/geo` | `.mmdb` directory |
+| `TRUST_PROXY` | `1` | `1` — behind a reverse proxy (IP from the end of `X-Forwarded-For`), `0` — directly exposed (IP from socket, headers untrusted) |
+| `TRUST_CF` | `0` | `1` — trust `CF-Connecting-IP`; only behind Cloudflare/Tunnel and only with `TRUST_PROXY=1`. `0` — ignore (safe for Caddy/VPS) |
+| `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, seconds; clamped to 0–60, invalid values fall back to 1.5 |
+| `RATE_LIMIT_PER_MINUTE` | `6000` | requests per IP per rolling minute, `0` — no limit |
+| `RUST_LOG` | `info` | log level |
 
-## Почему так, а не иначе
+## Why it is the way it is
 
-- **Почему не Python/FastAPI.** Первая версия была на FastAPI — работала,
-  но Rust даёт один бинарь без рантайма, компактный образ на `debian:slim`,
-  и нет GIL: сотни параллельных проверок на одном потоковом пуле tokio.
-- **Почему IP из конца XFF.** Caddy 2.5+ по умолчанию заменяет входящий
-  `X-Forwarded-For` адресом непосредственного клиента; чтобы сохранить
-  цепочку проверяемого прокси, в `Caddyfile.example` включён
-  `trusted_proxies`. Тогда Caddy дописывает адрес клиента в конец, и
-  только последняя запись достоверна. nginx
-  (`proxy_add_x_forwarded_for`) и Cloudflare также дописывают в конец.
-  Собственные заголовки Caddy (`X-Forwarded-Proto/Host`) исключены из
-  детекта анонимности, иначе за реверс-прокси все были бы «anonymous».
-- **Почему тип IP — эвристика.** Локальные данные не доказывают
-  residential-vs-business как платные ASN-базы. Поэтому ответ содержит
-  `signals` (какие ключевые слова и где сработали) — видно *почему*.
-- **Почему нет TLS/JA3.** TLS терминирует Caddy, judge видит только HTTP.
-  Сверка сертификата остаётся на стороне чекера (прямое vs через прокси).
+- **Why not Python/FastAPI.** The first version was FastAPI — it worked,
+  but Rust gives a single binary with no language runtime, a compact
+  `debian:slim` image, and no GIL: concurrent checks share one tokio thread
+  pool.
+- **Why IP from the end of XFF.** Caddy 2.5+ replaces the incoming
+  `X-Forwarded-For` with the immediate client address by default; to keep
+  the checked proxy's chain, `Caddyfile.example` enables `trusted_proxies`.
+  Caddy then appends the client address to the end, and only the last entry
+  is trustworthy. nginx (`proxy_add_x_forwarded_for`) and Cloudflare also
+  append. Caddy's own headers (`X-Forwarded-Proto/Host`) are excluded from
+  anonymity detection, otherwise everything behind a reverse proxy would
+  look «anonymous».
+- **Why IP type is a heuristic.** Local data cannot prove
+  residential-vs-business the way paid ASN DBs do. So the response carries
+  `signals` (which keywords matched and where) — you can see *why*.
+- **Why no TLS/JA3.** Caddy terminates TLS, the judge only sees HTTP.
+  Certificate comparison stays on the checker side (direct vs through proxy).
 
-## Разработка
+## Limitations
+
+- Anonymity and IP-type results are heuristics. A proxy can withhold or forge
+  headers, and local data cannot prove residential-vs-business the way paid
+  ASN databases can.
+- TLS/JA3 is not inspected: TLS terminates at Caddy, Cloudflare, Render, or
+  another reverse proxy.
+- Geo accuracy depends on the local database and its update cadence.
+- The public instances are shared and best-effort; use your own instance for
+  reliable measurements.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+The judge is a diagnostic tool, not a security boundary. It does not
+authenticate clients and cannot force a proxy to reveal headers; verdicts are
+best-effort. Run it behind a TLS-terminating reverse proxy, keep the HTTP port
+bound to loopback, set a rate limit, and make `TRUST_PROXY`/`TRUST_CF` match the
+actual topology. A misconfigured trusted header lets clients spoof the reported
+IP/geo and the rate-limit key.
+
+## Development
 
 ```sh
-cargo test        # 49 тестов: логика, geo-парсинг, API, лимиты
+cargo test        # 49 tests: logic, geo parsing, API, limits
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
 ```
 
-Структура: `src/main.rs` (HTTP), `src/geo.rs` (пул `.mmdb` + LRU),
-`src/logic.rs` (анонимность, тип IP, фикс-контент).
+Structure: `src/main.rs` (HTTP), `src/geo.rs` (`.mmdb` pool + cache),
+`src/logic.rs` (anonymity, IP type, fixed content).
 
-## Связанные проекты
+## Related projects
 
-- [proxpulse](https://github.com/nechel12/proxpulse) — десктопный чекер
-  прокси (Tauri 2), использует judge как backend для проверок; публичный
-  инстанс выше встроен в него по умолчанию.
+- [proxpulse](https://github.com/nechel12/proxpulse) — desktop proxy
+  checker (Tauri 2) that uses the judge as its check backend; the public
+  instance above is embedded in it by default.
 
-## Как помочь
+## Contributing
 
-Баг-репорты и PR приветствуются. Перед отправкой прогони `cargo test`.
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for the development workflow. By participating, you agree to the
+[Code of Conduct](CODE_OF_CONDUCT.md). Before sending a change, run
+`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
+`cargo test`. Report security issues through [SECURITY.md](SECURITY.md), not a
+public issue.
 
-## Лицензия
+## License
 
-Apache-2.0, см. [LICENSE](LICENSE).
+The code is licensed under Apache-2.0; see [LICENSE](LICENSE). Geolocation
+databases are not part of the code license: DB-IP Lite is CC BY 4.0, and
+MaxMind GeoLite2 is governed by the GeoLite2 EULA. Database files are
+downloaded separately or baked into the DB-IP image with attribution.
