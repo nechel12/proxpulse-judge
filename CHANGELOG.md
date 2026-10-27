@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.4 — 2026-10-27
+
+### Changed
+
+- Upgraded `axum` from 0.7 to 0.8; handlers now use the non-optional
+  `ConnectInfo` extractor, with the test harness injecting connect info.
+- Upgraded `maxminddb` from 0.27 to 0.32 (metadata accessor migration).
+- Enabled GitHub CodeQL code scanning for Rust and GitHub Actions.
+- Dev dependency `tower` is now 0.5 to match axum 0.8.
+
 ## 0.5.3 — 2026-10-27
 
 ### Security

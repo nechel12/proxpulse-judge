@@ -81,12 +81,12 @@ fn open_first(dir: &Path, names: &[&str]) -> (Option<Reader<Vec<u8>>>, Option<St
     }
     for path in &candidates {
         if let Some(r) = try_open(path) {
-            let kind = r.metadata.database_type.to_ascii_lowercase();
+            let kind = r.metadata().database_type.to_ascii_lowercase();
             if !kind.contains(pattern) {
                 warn!(
                     "ignoring {}: database_type {:?} does not look like {}",
                     path.display(),
-                    r.metadata.database_type,
+                    r.metadata().database_type,
                     pattern
                 );
                 continue;

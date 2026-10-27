@@ -94,7 +94,7 @@ async fn rate_limit_mw(
     if s.rate_limit.per_minute > 0 && path != "/healthz" && path != "/readyz" && path != "/metrics"
     {
         let conn = req.extensions().get::<ConnectInfo<SocketAddr>>().cloned();
-        let key = self_ip(req.headers(), conn, s.trust_proxy, s.trust_cf);
+        let key = self_ip(req.headers(), conn.map(|c| c.0), s.trust_proxy, s.trust_cf);
         let retry = {
             let entry = s
                 .rate_limit
@@ -226,13 +226,13 @@ fn headers_lower(headers: &HeaderMap) -> HashMap<String, String> {
 
 fn self_ip(
     headers: &HeaderMap,
-    conn: Option<ConnectInfo<SocketAddr>>,
+    conn: Option<SocketAddr>,
     trust_proxy: bool,
     trust_cf: bool,
 ) -> String {
     let cf = joined_header(headers, "cf-connecting-ip");
     let xff = joined_header(headers, "x-forwarded-for");
-    let sock = conn.map(|c| c.0.ip().to_string());
+    let sock = conn.map(|addr| addr.ip().to_string());
     let sock_ref = sock.as_deref().unwrap_or("127.0.0.1");
     client_ip(
         cf.as_deref(),
@@ -416,18 +416,18 @@ async fn generate_204() -> impl IntoResponse {
 
 async fn ip(
     State(s): State<Arc<AppState>>,
-    conn: Option<ConnectInfo<SocketAddr>>,
+    conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    Json(serde_json::json!({ "ip": self_ip(&headers, conn, s.trust_proxy, s.trust_cf) }))
+    Json(serde_json::json!({ "ip": self_ip(&headers, Some(conn.0), s.trust_proxy, s.trust_cf) }))
 }
 
 async fn headers_echo(
     State(s): State<Arc<AppState>>,
-    conn: Option<ConnectInfo<SocketAddr>>,
+    conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
+    let me = self_ip(&headers, Some(conn.0), s.trust_proxy, s.trust_cf);
     let raw = headers_lower(&headers);
     let chain = forwarded_chain(
         raw.get("x-forwarded-for").map(|x| x.as_str()),
@@ -452,10 +452,10 @@ async fn headers_echo(
 
 async fn geo_ep(
     State(s): State<Arc<AppState>>,
-    conn: Option<ConnectInfo<SocketAddr>>,
+    conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
+    let me = self_ip(&headers, Some(conn.0), s.trust_proxy, s.trust_cf);
     let data = geo_cached(&s, &me);
     Json(serde_json::json!({
         "ip": me,
@@ -493,10 +493,10 @@ fn attribution(s: &AppState) -> Vec<&'static str> {
 
 async fn ip_type(
     State(s): State<Arc<AppState>>,
-    conn: Option<ConnectInfo<SocketAddr>>,
+    conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
+    let me = self_ip(&headers, Some(conn.0), s.trust_proxy, s.trust_cf);
     let data = geo_cached(&s, &me);
     let ptr = maybe_rdns(&s, &me, data.aso.as_deref()).await;
     let (t, signals) = classify_ip(data.aso.as_deref(), ptr.as_deref());
@@ -512,11 +512,11 @@ async fn content() -> impl IntoResponse {
 
 async fn judge(
     State(s): State<Arc<AppState>>,
-    conn: Option<ConnectInfo<SocketAddr>>,
+    conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(p): Query<JudgeParams>,
 ) -> impl IntoResponse {
-    let me = self_ip(&headers, conn, s.trust_proxy, s.trust_cf);
+    let me = self_ip(&headers, Some(conn.0), s.trust_proxy, s.trust_cf);
     let raw = headers_lower(&headers);
     let chain = forwarded_chain(
         raw.get("x-forwarded-for").map(|x| x.as_str()),
@@ -778,6 +778,15 @@ mod api_tests {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
+    async fn add_connect_info(
+        mut req: axum::http::Request<axum::body::Body>,
+        next: axum::middleware::Next,
+    ) -> Response {
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        next.run(req).await
+    }
+
     fn test_app() -> Router {
         test_app_with_limit(1_000_000)
     }
@@ -824,6 +833,7 @@ mod api_tests {
                 state.clone(),
                 metrics_mw,
             ))
+            .layer(axum::middleware::from_fn(add_connect_info))
             .with_state(state)
     }
 
