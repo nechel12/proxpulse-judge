@@ -254,10 +254,14 @@ Cloudflare Tunnel в этом варианте не требуется: TLS и �
 0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
 ```
 
-Если каталог `./geo` не содержит `.mmdb`, entrypoint контейнера
-автоматически скачивает DB-IP Lite при старте. Собственные файлы
-(MaxMind или DB-IP) имеют приоритет — фолбэк срабатывает только
-на пустой каталог.
+В docker-compose каталог `./geo` смонтирован **read-only**, поэтому
+entrypoint не может туда писать: для compose базы скачиваются на хосте
+(`bash scripts/download-dbip.sh`) или используются образы с вшитыми
+базами (Render). Автоскачивание в entrypoint работает, только если
+`GEO_DIR` доступен на запись (например, `docker run` без read-only
+mount); иначе в лог пишется warning и сервис стартует без гео.
+Собственные файлы (MaxMind или DB-IP) имеют приоритет — фолбэк
+срабатывает только когда валидных `.mmdb` нет.
 
 ## Обслуживание: логи
 

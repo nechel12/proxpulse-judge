@@ -254,10 +254,13 @@ monthly cron + restart:
 0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
 ```
 
-If the `./geo` directory contains no `.mmdb` files, the container
-entrypoint downloads DB-IP Lite automatically on startup. Custom files
-(MaxMind or DB-IP) take precedence — the fallback only fires on an empty
-directory.
+`docker-compose` mounts `./geo` **read-only**, so the entrypoint cannot
+write there: for compose, download the databases on the host
+(`bash scripts/download-dbip.sh`) or use an image with baked databases
+(Render). The entrypoint fallback only works when `GEO_DIR` is writable
+(e.g. `docker run` without a read-only mount); otherwise it logs a warning
+and starts without geo. Custom files (MaxMind or DB-IP) take precedence —
+the fallback only fires when no valid `.mmdb` is present.
 
 ## Maintenance: logs
 
