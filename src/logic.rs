@@ -257,7 +257,7 @@ const HOSTING_KW: &[&str] = &[
     "host",
     "cloud",
     "vps",
-    "dedicat",
+    "dedicated",
     "datacenter",
     "data center",
     "colocation",
@@ -295,17 +295,19 @@ const HOSTING_VENDORS: &[&str] = &[
     "yandex cloud",
 ];
 const MOBILE_KW: &[&str] = &[
-    "mobile", "cellular", "wireless", "mobility", "gsm", " lte", "5g ",
+    "mobile", "cellular", "wireless", "mobility", "gsm", "lte", "5g",
 ];
 const RESIDENTIAL_KW: &[&str] = &[
     "dynamic",
     "residential",
     "broadband",
     "dsl",
+    "adsl",
+    "vdsl",
     "cable",
     "fiber",
     "ftth",
-    " fttb",
+    "fttb",
     "pool",
     "retail",
     "subscriber",
@@ -316,6 +318,7 @@ const BUSINESS_KW: &[&str] = &[
     "inc",
     "gmbh",
     "corp",
+    "corporation",
     "bank",
     "university",
     "government",
@@ -324,11 +327,27 @@ const BUSINESS_KW: &[&str] = &[
     "hotel",
 ];
 
+/// Whole-word match: "inc" must not match "Zinc", "host" must not match
+/// "ghost". Multi-word keywords are matched as phrases with the same
+/// boundary rule.
+fn contains_word(text: &str, needle: &str) -> bool {
+    let needle = needle.trim();
+    if needle.is_empty() {
+        return false;
+    }
+    text.match_indices(needle).any(|(idx, _)| {
+        let before = text[..idx].chars().next_back();
+        let after = text[idx + needle.len()..].chars().next();
+        !before.map(|c| c.is_alphanumeric()).unwrap_or(false)
+            && !after.map(|c| c.is_alphanumeric()).unwrap_or(false)
+    })
+}
+
 fn hits(text: &str, keywords: &[&str]) -> Vec<String> {
-    let t = format!(" {} ", text.to_ascii_lowercase());
+    let t = text.to_ascii_lowercase();
     keywords
         .iter()
-        .filter(|k| t.contains(**k))
+        .filter(|k| contains_word(&t, k))
         .map(|k| k.trim().to_string())
         .collect()
 }
@@ -361,12 +380,17 @@ pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (String, TypeSignal
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .collect();
+    // Google's residential Fiber ISP shares the cloud vendor token.
+    let google_fiber = contains_word(&low, "google fiber");
     let hosting_vendor: Vec<String> = HOSTING_VENDORS
         .iter()
         .filter(|v| {
             let v: &str = v;
+            if v == "google" && google_fiber {
+                return false;
+            }
             if v.contains(' ') {
-                low.contains(v)
+                contains_word(&low, v)
             } else {
                 tokens.contains(&v)
             }
@@ -383,6 +407,10 @@ pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (String, TypeSignal
         business_kw: hits(&hay_org, BUSINESS_KW),
         note: None,
     };
+    if google_fiber {
+        signals.note = Some("google fiber: residential ISP".to_string());
+        return ("residential".to_string(), signals);
+    }
     if !signals.mobile_kw.is_empty() {
         return ("mobile".to_string(), signals);
     }
@@ -663,6 +691,25 @@ mod tests {
         // "Shaw" contains "aws" — must NOT match the vendor list
         let (t, s) = classify_ip(Some("Shaw Communications"), None);
         assert!(s.hosting_vendor.is_empty());
+        assert_eq!(t, "residential");
+    }
+
+    #[test]
+    fn classify_keywords_respect_word_boundaries() {
+        // "Zinc"/"Vincent" contain "inc"; "Ghost" contains "host".
+        let (t, _) = classify_ip(Some("Zinc Networks"), None);
+        assert_eq!(t, "residential");
+        let (t, _) = classify_ip(Some("Ghost Productions"), None);
+        assert_eq!(t, "residential");
+        let (t, _) = classify_ip(Some("Acme Inc."), None);
+        assert_eq!(t, "business");
+        let (t, _) = classify_ip(Some("Ghost Hosting"), None);
+        assert_eq!(t, "datacenter");
+    }
+
+    #[test]
+    fn classify_google_fiber_is_residential() {
+        let (t, _) = classify_ip(Some("Google Fiber Inc."), None);
         assert_eq!(t, "residential");
     }
 

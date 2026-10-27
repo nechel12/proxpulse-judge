@@ -35,11 +35,9 @@ pub struct GeoInfo {
 
 pub struct GeoPool {
     city: Option<Reader<Vec<u8>>>,
-    city_src: Option<String>,
     country: Option<Reader<Vec<u8>>>,
-    country_src: Option<String>,
     asn: Option<Reader<Vec<u8>>>,
-    asn_src: Option<String>,
+    sources: std::collections::HashMap<String, String>,
 }
 
 fn try_open(path: &Path) -> Option<Reader<Vec<u8>>> {
@@ -99,30 +97,28 @@ impl GeoPool {
         let (city, city_src) = open_first(dir, CITY_CANDIDATES);
         let (country, country_src) = open_first(dir, COUNTRY_CANDIDATES);
         let (asn, asn_src) = open_first(dir, ASN_CANDIDATES);
+        let mut sources = std::collections::HashMap::new();
+        if let Some(s) = city_src {
+            sources.insert("city".to_string(), s);
+        }
+        if let Some(s) = country_src {
+            sources.insert("country".to_string(), s);
+        }
+        if let Some(s) = asn_src {
+            sources.insert("asn".to_string(), s);
+        }
         let pool = Self {
             city,
-            city_src,
             country,
-            country_src,
             asn,
-            asn_src,
+            sources,
         };
         info!("geo sources: {:?} (dir={})", pool.sources(), dir.display());
         pool
     }
 
-    pub fn sources(&self) -> std::collections::HashMap<String, String> {
-        let mut m = std::collections::HashMap::new();
-        if let Some(s) = &self.city_src {
-            m.insert("city".to_string(), s.clone());
-        }
-        if let Some(s) = &self.country_src {
-            m.insert("country".to_string(), s.clone());
-        }
-        if let Some(s) = &self.asn_src {
-            m.insert("asn".to_string(), s.clone());
-        }
-        m
+    pub fn sources(&self) -> &std::collections::HashMap<String, String> {
+        &self.sources
     }
 
     pub fn lookup(&self, ip: &str) -> GeoInfo {
@@ -179,6 +175,11 @@ impl GeoPool {
                 Err(e) => out.error = Some(format!("asn: {}", short_err(&e.to_string()))),
             }
         }
+        if found {
+            // A failed city/country reader must not poison a response that
+            // was successfully filled from another source.
+            out.error = None;
+        }
         if !found && out.error.is_none() {
             out.error = Some(if self.sources().is_empty() {
                 "no db".to_string()
@@ -202,21 +203,19 @@ fn is_empty_record(v: &Value) -> bool {
     }
 }
 
-fn get_path<'a>(v: &'a Value, paths: &[&[&str]]) -> Option<&'a Value> {
+fn get_str(v: &Value, paths: &[&[&str]]) -> Option<String> {
+    // Try every shape, not just the first path that resolves: e.g. a
+    // `country` object without `names.en` should still fall through to a
+    // flat `country` string or `registered_country`.
     paths.iter().find_map(|path| {
         let mut cur = v;
         for key in *path {
             cur = cur.get(*key)?;
         }
-        Some(cur)
+        cur.as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
     })
-}
-
-fn get_str(v: &Value, paths: &[&[&str]]) -> Option<String> {
-    get_path(v, paths)
-        .and_then(|c| c.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
 }
 
 fn get_f64(v: &Value, paths: &[&[&str]]) -> Option<f64> {
@@ -251,13 +250,21 @@ fn get_u32(v: &Value, paths: &[&[&str]]) -> Option<u32> {
 
 fn apply_city(v: &Value, out: &mut GeoInfo) {
     if out.country.is_none() {
-        out.country = get_str(v, &[&["country", "names", "en"], &["country"]]);
+        out.country = get_str(
+            v,
+            &[
+                &["country", "names", "en"],
+                &["registered_country", "names", "en"],
+                &["country"],
+            ],
+        );
     }
     if out.country_code.is_none() {
         out.country_code = get_str(
             v,
             &[
                 &["country", "iso_code"],
+                &["registered_country", "iso_code"],
                 &["country_code"],
                 &["countryCode"],
             ],
