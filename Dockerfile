@@ -23,6 +23,7 @@ USER judge
 
 ENV GEO_DIR=/app/geo \
     TRUST_PROXY=1 \
+    TRUST_CF=0 \
     RUST_LOG=info
 
 EXPOSE 8000

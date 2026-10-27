@@ -436,7 +436,9 @@ async fn main() {
 
     let geo_dir = env::var("GEO_DIR").unwrap_or_else(|_| "/app/geo".to_string());
     let trust_proxy = env::var("TRUST_PROXY").unwrap_or_else(|_| "1".to_string()) == "1";
-    let trust_cf = env::var("TRUST_CF").unwrap_or_else(|_| "1".to_string()) == "1";
+    // CF headers are proxy headers too: without TRUST_PROXY the service
+    // must resolve the IP from the socket, never from client headers.
+    let trust_cf = trust_proxy && env::var("TRUST_CF").unwrap_or_else(|_| "0".to_string()) == "1";
     let rdns_timeout = Duration::from_secs_f64(
         env::var("RDNS_TIMEOUT")
             .ok()

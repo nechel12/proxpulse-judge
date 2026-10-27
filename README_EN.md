@@ -48,6 +48,13 @@ Check:
 curl https://check.yourdomain.com/healthz
 ```
 
+`Caddyfile.example` enables `trusted_proxies`: since Caddy 2.5 the incoming
+`X-Forwarded-For` from the checked proxy is dropped by default, so the judge
+would not see a real-IP leak passed via XFF. Trusting XFF from all clients is
+safe only because the judge listens on `127.0.0.1` and is reachable solely
+through Caddy. Keep `TRUST_CF=0` (the default) for this variant: there is no
+Cloudflare here, and CF headers are trivially forgeable.
+
 ## Variant B — Cloudflare Tunnel (no Caddy, no open ports)
 
 ```sh
@@ -93,11 +100,11 @@ ingress:
 > and in ingress/service use `http://proxpulse-judge:8000`.
 > cloudflared on the host itself simply goes to `http://127.0.0.1:8000`.
 
-No judge changes needed: `TRUST_CF=1` by default, the service takes the
-real IP from `CF-Connecting-IP` (set by Cloudflare itself, takes priority
-over `X-Forwarded-For`), and all `cf-*`/`cdn-loop` headers are excluded from
-anonymity detection — otherwise a direct check through the tunnel would give
-a false `transparent`. Check:
+Set `TRUST_CF=1` explicitly in this variant (the default is `0`, safe for
+Caddy/VPS): the service takes the real IP from `CF-Connecting-IP` (set by
+Cloudflare itself, takes priority over `X-Forwarded-For`), and all
+`cf-*`/`cdn-loop` headers are excluded from anonymity detection — otherwise a
+direct check through the tunnel would give a false `transparent`. Check:
 
 ```sh
 MYIP=$(curl -s https://api.ipify.org)
@@ -279,8 +286,8 @@ For running without Docker with logs in a file — example
 |---|---|---|
 | `PORT` | `8000` | HTTP port |
 | `GEO_DIR` | `/app/geo` | `.mmdb` directory |
-| `TRUST_PROXY` | `1` | `1` — behind Caddy (IP from the end of `X-Forwarded-For`), `0` — directly exposed (IP from socket) |
-| `TRUST_CF` | `1` | `1` — trust `CF-Connecting-IP` (Cloudflare Tunnel), `0` — ignore |
+| `TRUST_PROXY` | `1` | `1` — behind a reverse proxy (IP from the end of `X-Forwarded-For`), `0` — directly exposed (IP from socket, headers untrusted) |
+| `TRUST_CF` | `0` | `1` — trust `CF-Connecting-IP`; only behind Cloudflare/Tunnel and only with `TRUST_PROXY=1`. `0` — ignore (safe for Caddy/VPS) |
 | `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, sec |
 | `RATE_LIMIT_PER_MINUTE` | `6000` | requests per IP per sliding minute, `0` — no limit |
 | `RUST_LOG` | `info` | log level |
@@ -290,10 +297,14 @@ For running without Docker with logs in a file — example
 - **Why not Python/FastAPI.** The first version was FastAPI — it worked,
   but Rust gives a single runtime-free binary, a compact `debian:slim` image,
   and no GIL: hundreds of parallel checks on one tokio thread pool.
-- **Why IP from the end of XFF.** Caddy appends the client address to the end
-  of the chain — only the last entry is trustworthy. Caddy's own headers
-  (`X-Forwarded-Proto/Host`) are excluded from anonymity detection,
-  otherwise everything behind a reverse proxy would look «anonymous».
+- **Why IP from the end of XFF.** Caddy 2.5+ replaces the incoming
+  `X-Forwarded-For` with the immediate client address by default; to keep
+  the checked proxy's chain, `Caddyfile.example` enables `trusted_proxies`.
+  Caddy then appends the client address to the end, and only the last entry
+  is trustworthy. nginx (`proxy_add_x_forwarded_for`) and Cloudflare also
+  append. Caddy's own headers (`X-Forwarded-Proto/Host`) are excluded from
+  anonymity detection, otherwise everything behind a reverse proxy would
+  look «anonymous».
 - **Why IP type is a heuristic.** Local data cannot prove
   residential-vs-business the way paid ASN DBs do. So the response carries
   `signals` (which keywords matched and where) — you can see *why*.
