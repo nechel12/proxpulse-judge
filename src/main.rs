@@ -328,8 +328,10 @@ async fn judge(
             .direct_ip
             .as_deref()
             .map(str::trim)
-            .filter(|d| !d.is_empty() && d.parse::<std::net::IpAddr>().is_ok());
-        anonymity_level(&for_analysis, direct)
+            .filter(|d| !d.is_empty())
+            .and_then(|d| d.parse::<std::net::IpAddr>().ok())
+            .map(|ip| ip.to_string());
+        anonymity_level(&for_analysis, direct.as_deref())
     };
 
     let g = geo_cached(&s, &me);

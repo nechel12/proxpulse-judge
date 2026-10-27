@@ -60,6 +60,41 @@ pub fn clean_host(s: &str) -> String {
     }
     t.to_string()
 }
+
+/// Canonical textual form of an address taken from a header:
+/// trims, unwraps `[v6]:port` / `v4:port`, validates, and re-prints it.
+fn normalize_host(s: &str) -> Option<String> {
+    clean_host(s)
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .map(|ip| ip.to_string())
+}
+
+fn is_ipv4_char(c: char) -> bool {
+    c.is_ascii_digit() || c == '.'
+}
+
+fn is_ipv6_char(c: char) -> bool {
+    c.is_ascii_hexdigit() || c == ':' || c == '.'
+}
+
+/// True when `ip` occurs in `text` on character boundaries (so
+/// `1.2.3.4` does not match inside `1.2.3.40`, and `::1` does not
+/// match inside `::10`).
+fn ip_in_text(text: &str, ip: &std::net::IpAddr) -> bool {
+    let needle = ip.to_string().to_ascii_lowercase();
+    let haystack = text.to_ascii_lowercase();
+    let boundary: fn(char) -> bool = match ip {
+        std::net::IpAddr::V4(_) => is_ipv4_char,
+        std::net::IpAddr::V6(_) => is_ipv6_char,
+    };
+    haystack.match_indices(&needle).any(|(idx, _)| {
+        let before = haystack[..idx].chars().next_back();
+        let after = haystack[idx + needle.len()..].chars().next();
+        !before.map(boundary).unwrap_or(false) && !after.map(boundary).unwrap_or(false)
+    })
+}
+
 /// Resolve the real client IP (= proxy exit IP when checked via proxy).
 ///
 /// Priority: `CF-Connecting-IP` (set by Cloudflare edge, single IP,
@@ -73,18 +108,19 @@ pub fn client_ip(
     trust_cf: bool,
 ) -> String {
     if trust_cf {
-        let cf = clean_host(cf_ip.unwrap_or(""));
-        if !cf.is_empty() && cf.parse::<std::net::IpAddr>().is_ok() {
+        if let Some(cf) = cf_ip.and_then(normalize_host) {
             return cf;
         }
     }
     if trust_proxy {
         let chain = split_xff(xff);
         if let Some(last) = chain.last() {
-            return clean_host(last);
+            if let Some(ip) = normalize_host(last) {
+                return ip;
+            }
         }
     }
-    socket_ip.to_string()
+    normalize_host(socket_ip).unwrap_or_else(|| socket_ip.to_string())
 }
 
 /// XFF entries added BEFORE our reverse proxy (i.e. by the checked proxy).
@@ -107,27 +143,36 @@ pub fn forwarded_chain(
     trust_cf: bool,
     cf_ip: Option<&str>,
 ) -> Vec<String> {
-    let mut chain: Vec<String> = split_xff(xff).into_iter().map(|e| clean_host(&e)).collect();
+    let mut chain: Vec<String> = split_xff(xff)
+        .into_iter()
+        .filter_map(|e| normalize_host(&e))
+        .collect();
     if !trust_proxy {
         return chain;
     }
+    let client = normalize_host(client).unwrap_or_else(|| client.to_string());
     // CDN branch: same condition as the CF priority in [`client_ip`]; the
     // equality guard keeps this fail-closed if a caller ever passes an
     // inconsistent client.
     let cdn_client = if trust_cf {
-        cf_ip
-            .map(|c| clean_host(c))
-            .filter(|c| c.parse::<std::net::IpAddr>().is_ok())
+        cf_ip.and_then(normalize_host)
     } else {
         None
     };
-    if cdn_client.as_deref() == Some(client) {
-        if let Some(pos) = chain.iter().position(|e| e == client) {
+    if cdn_client.as_deref() == Some(client.as_str()) {
+        // The CDN appends the client address to the proxy-supplied chain,
+        // so the *last* occurrence marks where our infrastructure begins.
+        // The first occurrence may be a value the checked proxy prepended
+        // itself, and truncating there would hide leaks after it.
+        if let Some(pos) = chain.iter().rposition(|e| e == &client) {
             chain.truncate(pos);
         }
+        // Drop any remaining copies of the edge/client address (an elite
+        // proxy may have put its own exit into XFF as well).
+        chain.retain(|e| e != &client);
         return chain;
     }
-    if chain.last().map(|s| s.as_str()) == Some(client) {
+    if chain.last().map(|s| s.as_str()) == Some(client.as_str()) {
         chain.pop();
     }
     chain
@@ -173,19 +218,22 @@ fn is_telltale(name: &str) -> bool {
 /// direct /ip call; without it leak detection is limited to
 /// multi-hop XFF chains.
 pub fn anonymity_level(headers: &HashMap<String, String>, direct_ip: Option<&str>) -> &'static str {
-    let chain = split_xff(headers.get("x-forwarded-for").map(|s| s.as_str()));
+    let chain: Vec<String> = split_xff(headers.get("x-forwarded-for").map(|s| s.as_str()))
+        .into_iter()
+        .filter_map(|e| normalize_host(&e))
+        .collect();
+    let direct: Option<std::net::IpAddr> = direct_ip.and_then(|d| d.parse().ok());
 
-    if let Some(d) = direct_ip {
-        if !d.is_empty() {
-            if chain.iter().any(|c| c == d || c.contains(d)) {
-                return "transparent";
-            }
-            if headers
-                .iter()
-                .any(|(k, v)| k != "x-forwarded-for" && !is_infra(k) && v.contains(d))
-            {
-                return "transparent";
-            }
+    if let Some(d) = direct {
+        let d_str = d.to_string();
+        if chain.iter().any(|c| c == &d_str) {
+            return "transparent";
+        }
+        if headers
+            .iter()
+            .any(|(k, v)| k != "x-forwarded-for" && !is_infra(k) && ip_in_text(v, &d))
+        {
+            return "transparent";
         }
     }
     if chain.len() > 1 {
@@ -623,5 +671,70 @@ mod tests {
             forwarded_chain(Some("1.2.3.4:40000, 5.6.7.8"), "5.6.7.8", true, false, None),
             vec!["1.2.3.4".to_string()]
         );
+    }
+
+    #[test]
+    fn client_ip_rejects_garbage_xff() {
+        assert_eq!(
+            client_ip(None, Some("not-an-ip"), "9.9.9.9", true, true),
+            "9.9.9.9"
+        );
+        assert_eq!(
+            client_ip(None, Some("1.2.3.4:80, garbage"), "9.9.9.9", true, true),
+            "9.9.9.9"
+        );
+        // a valid address with a source port still resolves
+        assert_eq!(
+            client_ip(None, Some("1.2.3.4:80"), "9.9.9.9", true, true),
+            "1.2.3.4"
+        );
+    }
+
+    #[test]
+    fn prefix_is_not_a_leak() {
+        let h = map(&[("x-forwarded-for", "1.2.3.40")]);
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4")), "anonymous");
+        let h = map(&[("user-agent", "Mozilla 1.2.3.40")]);
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4")), "elite");
+    }
+
+    #[test]
+    fn header_value_exact_ip_is_a_leak() {
+        let h = map(&[("referer", "https://x/?ip=1.2.3.4&y=1")]);
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4")), "transparent");
+    }
+
+    #[test]
+    fn ipv6_forms_are_normalized() {
+        let h = map(&[("x-forwarded-for", "2001:0db8:0:0:0:0:0:1")]);
+        assert_eq!(anonymity_level(&h, Some("2001:db8::1")), "transparent");
+        let h = map(&[("x-forwarded-for", "2001:db8::10")]);
+        assert_eq!(anonymity_level(&h, Some("2001:db8::1")), "anonymous");
+    }
+
+    #[test]
+    fn cdn_chain_uses_last_client_occurrence() {
+        // Realistic CF append: the proxy prepended its own exit (same as
+        // CF-Connecting-IP) before the leaked real IP; CF appended the
+        // client again, then infra hops followed.
+        assert_eq!(
+            forwarded_chain(
+                Some("9.9.9.9, 1.2.3.4, 9.9.9.9, 172.71.146.141, 10.29.121.232"),
+                "9.9.9.9",
+                true,
+                true,
+                Some("9.9.9.9"),
+            ),
+            vec!["1.2.3.4"]
+        );
+        // Elite proxy: exit only, CF appended it again -> nothing leaks.
+        assert!(forwarded_chain(
+            Some("9.9.9.9, 9.9.9.9, 172.71.146.141, 10.29.121.232"),
+            "9.9.9.9",
+            true,
+            true,
+            Some("9.9.9.9"),
+        )
+        .is_empty());
     }
 }
