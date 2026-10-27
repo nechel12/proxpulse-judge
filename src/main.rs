@@ -122,15 +122,28 @@ struct JudgeParams {
     direct_ip: Option<String>,
 }
 
-fn headers_lower(headers: &HeaderMap) -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    for (k, v) in headers.iter() {
-        m.insert(
-            k.as_str().to_ascii_lowercase(),
-            v.to_str().unwrap_or("").to_string(),
-        );
+/// Join all values of a header with ", " so duplicate header lines are
+/// handled the same way everywhere. `HeaderMap::get` only returns the
+/// first value, while `iter()` yields the last one per name — that
+/// mismatch used to produce an inconsistent `ip`/`xff_chain` pair.
+fn joined_header(headers: &HeaderMap, name: &str) -> Option<String> {
+    let mut values = headers.get_all(name).iter();
+    let first = values.next()?;
+    let mut out = first.to_str().unwrap_or("").to_string();
+    for v in values {
+        out.push_str(", ");
+        out.push_str(v.to_str().unwrap_or(""));
     }
-    m
+    Some(out)
+}
+
+fn headers_lower(headers: &HeaderMap) -> HashMap<String, String> {
+    headers
+        .keys()
+        .filter_map(|name| {
+            joined_header(headers, name.as_str()).map(|v| (name.as_str().to_ascii_lowercase(), v))
+        })
+        .collect()
 }
 
 fn self_ip(
@@ -139,13 +152,17 @@ fn self_ip(
     trust_proxy: bool,
     trust_cf: bool,
 ) -> String {
-    let cf = headers
-        .get("cf-connecting-ip")
-        .and_then(|v| v.to_str().ok());
-    let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
+    let cf = joined_header(headers, "cf-connecting-ip");
+    let xff = joined_header(headers, "x-forwarded-for");
     let sock = conn.map(|c| c.0.ip().to_string());
     let sock_ref = sock.as_deref().unwrap_or("127.0.0.1");
-    client_ip(cf, xff, sock_ref, trust_proxy, trust_cf)
+    client_ip(
+        cf.as_deref(),
+        xff.as_deref(),
+        sock_ref,
+        trust_proxy,
+        trust_cf,
+    )
 }
 
 fn geo_cached(state: &AppState, ip: &str) -> GeoInfo {
@@ -642,6 +659,26 @@ mod api_tests {
         assert_eq!(v["ip"], "5.6.7.8");
         assert_eq!(v["anonymity"], "transparent");
         assert_eq!(v["content_sha256"].as_str().unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn duplicate_xff_is_joined_consistently() {
+        let res = test_app()
+            .oneshot(
+                Request::get("/judge?direct_ip=1.1.1.1")
+                    .header("x-forwarded-for", "1.1.1.1")
+                    .header("x-forwarded-for", "9.9.9.9")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ip"], "9.9.9.9");
+        assert_eq!(v["xff_chain"], serde_json::json!(["1.1.1.1"]));
+        assert_eq!(v["headers"]["x-forwarded-for"], "1.1.1.1, 9.9.9.9");
+        assert_eq!(v["anonymity"], "transparent");
     }
 
     #[tokio::test]
