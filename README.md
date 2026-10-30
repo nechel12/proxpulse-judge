@@ -18,8 +18,8 @@ anonymity analysis, and fixed content for tamper checks.
 Stack: **Rust + axum + tokio**, databases in RAM, lookup cache. No third-party
 HTTP APIs in the request path; a configurable rate limiter
 (`RATE_LIMIT_PER_MINUTE`, 6000/min per IP by default). The service is a single
-binary on `debian:slim`; the image also includes `bash`, `curl`, and `gzip` for
-the optional database fallback.
+binary on `debian:bookworm-slim`; the image also includes `bash`, `curl`, and
+`gzip` for the optional database fallback.
 
 > Status: pre-1.0. The documented HTTP endpoints are intended to be stable,
 > but behavior may change in minor releases.
@@ -261,7 +261,7 @@ finds files by itself:
 
 - `GeoLite2-City.mmdb` or `dbip-city-lite.mmdb`
 - `GeoLite2-ASN.mmdb` or `dbip-asn-lite.mmdb`
-- `GeoLite2-Country.mmdb` — fallback if there is no City
+- `GeoLite2-Country.mmdb` or `dbip-country-lite.mmdb` — fallback if there is no City
 
 Without files, geo fields come back empty (`"error": "no db"`); the type
 is usually `unknown` (rDNS may still provide a hint); everything else
