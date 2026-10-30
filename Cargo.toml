@@ -1,6 +1,6 @@
 [package]
 name = "proxpulse-judge"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2021"
 description = "Self-hosted proxy-check backend (Rust/axum)"
 license = "Apache-2.0"

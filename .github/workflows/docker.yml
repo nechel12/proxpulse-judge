@@ -1,5 +1,5 @@
 # Monthly rebuild образа с вшитыми DB-IP Lite (базы выходят раз в месяц).
-# Пушит ghcr.io/<owner>/proxpulse-judge:latest + :YYYYMM.
+# Schedule пушит :latest + :YYYYMM; ручной релиз добавляет :vX.Y.Z.
 # Образ собирается БЕЗ кэша слоёв специально: иначе закэшируется и стадия
 # скачивания баз, и monthly-обновление молча перестанет обновляться.
 # Первый запуск — руками (Actions → docker → Run workflow). Пакет
@@ -45,6 +45,31 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: RustSec audit
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Actionlint
+        uses: reviewdog/action-actionlint@v1.81.0
+        with:
+          reporter: github-check
+          fail_level: error
+
+      - name: Hadolint Dockerfile
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+          ignore: DL3008
+
+      - name: Hadolint Dockerfile.render
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: Dockerfile.render
+          failure-threshold: warning
+          ignore: DL3008
+
   smoke:
     needs: test
     runs-on: ubuntu-latest
@@ -56,6 +81,14 @@ jobs:
 
       - name: Build image
         run: docker build -t proxpulse-judge:smoke -f Dockerfile .
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: proxpulse-judge:smoke
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
 
       - name: Smoke and load checks
         run: |
@@ -115,7 +148,7 @@ jobs:
           tags: |
             ${{ steps.img.outputs.name }}:latest
             ${{ steps.img.outputs.name }}:${{ steps.tag.outputs.month }}
-            ${{ steps.img.outputs.name }}:${{ steps.version.outputs.version }}
+            ${{ github.event_name == 'workflow_dispatch' && format('{0}:{1}', steps.img.outputs.name, steps.version.outputs.version) || '' }}
 
       # Авто-редеплой своего Render-сервиса после свежей сборки.
       # Секретом владеет только владелец форка: в этом репо секрета нет

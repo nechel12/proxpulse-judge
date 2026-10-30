@@ -35,6 +35,14 @@ const INFRA_HEADERS: &[&str] = &[
     "x-forwarded-ssl",
     "x-real-port",
 ];
+const CF_INFRA_HEADERS: &[&str] = &[
+    "cdn-loop",
+    "cf-connecting-ip",
+    "cf-ipcountry",
+    "cf-ray",
+    "cf-visitor",
+    "true-client-ip",
+];
 
 pub fn split_xff(value: Option<&str>) -> Vec<String> {
     match value {
@@ -214,13 +222,9 @@ pub fn forwarded_chain(
 
 fn is_infra(name: &str, trust_cf: bool) -> bool {
     let n = name.to_ascii_lowercase();
-    // Cloudflare edge headers: CF-Connecting-IP always equals the exit IP
-    // by construction, so it must never count as a leak or a telltale —
-    // but only when CF headers are actually trusted. On a plain Caddy/VPS
-    // deployment any client can send these names, so treating them as
-    // infrastructure would hide real leaks.
-    INFRA_HEADERS.contains(&n.as_str())
-        || (trust_cf && (n == "cdn-loop" || n == "true-client-ip" || n.starts_with("cf-")))
+    // Only headers controlled by Cloudflare are infrastructure. Arbitrary
+    // cf-* names can pass through the edge and must still be checked for leaks.
+    INFRA_HEADERS.contains(&n.as_str()) || (trust_cf && CF_INFRA_HEADERS.contains(&n.as_str()))
 }
 
 fn is_telltale(name: &str, trust_cf: bool) -> bool {
@@ -247,8 +251,7 @@ fn is_telltale(name: &str, trust_cf: bool) -> bool {
 /// `headers` — lowercased request headers as seen by judge, with the
 /// reverse-proxy-added last XFF entry already removed (see
 /// [`forwarded_chain`]). `direct_ip` — checker's own IP learned via a
-/// direct /ip call; without it leak detection is limited to
-/// multi-hop XFF chains.
+/// direct /ip call; without it only proxy presence can be determined.
 pub fn anonymity_level(
     headers: &HashMap<String, String>,
     direct_ip: Option<&str>,
@@ -271,10 +274,6 @@ pub fn anonymity_level(
         {
             return "transparent";
         }
-    }
-    if chain.len() > 1 {
-        // multi-hop chain without a known direct IP: something leaks hops
-        return "transparent";
     }
     if !chain.is_empty() || !raw_xff.is_empty() {
         return "anonymous";
@@ -346,12 +345,6 @@ const RESIDENTIAL_KW: &[&str] = &[
     "subscriber",
 ];
 const BUSINESS_KW: &[&str] = &[
-    "ltd",
-    "llc",
-    "inc",
-    "gmbh",
-    "corp",
-    "corporation",
     "bank",
     "university",
     "government",
@@ -647,6 +640,13 @@ mod tests {
     }
 
     #[test]
+    fn multiple_non_direct_hops_are_anonymous() {
+        let h = map(&[("x-forwarded-for", "9.9.9.9, 8.8.8.8")]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "anonymous");
+        assert_eq!(anonymity_level(&h, None, true), "anonymous");
+    }
+
+    #[test]
     fn anonymous_forwarded_no_leak() {
         let h = map(&[("x-forwarded-for", "9.9.9.9"), ("user-agent", "x")]);
         assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "anonymous");
@@ -707,6 +707,16 @@ mod tests {
     }
 
     #[test]
+    fn unknown_cf_header_is_checked_for_leaks() {
+        let h = map(&[
+            ("cf-connecting-ip", "5.6.7.8"),
+            ("cf-custom", "1.1.1.1"),
+            ("x-forwarded-for", ""),
+        ]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "transparent");
+    }
+
+    #[test]
     fn classify_datacenter() {
         let (t, s) = classify_ip(Some("Hetzner Online GmbH"), None);
         assert_eq!(t, "datacenter");
@@ -729,15 +739,21 @@ mod tests {
 
     #[test]
     fn classify_keywords_respect_word_boundaries() {
-        // "Zinc"/"Vincent" contain "inc"; "Ghost" contains "host".
-        let (t, _) = classify_ip(Some("Zinc Networks"), None);
-        assert_eq!(t, "residential");
+        // "Ghost" contains "host".
         let (t, _) = classify_ip(Some("Ghost Productions"), None);
         assert_eq!(t, "residential");
-        let (t, _) = classify_ip(Some("Acme Inc."), None);
+        let (t, _) = classify_ip(Some("Acme Bank"), None);
         assert_eq!(t, "business");
         let (t, _) = classify_ip(Some("Ghost Hosting"), None);
         assert_eq!(t, "datacenter");
+    }
+
+    #[test]
+    fn legal_suffix_does_not_make_residential_ip_business() {
+        let (t, s) = classify_ip(Some("Comcast Cable Communications LLC"), None);
+        assert_eq!(t, "residential");
+        assert!(s.business_kw.is_empty());
+        assert!(!s.residential_kw.is_empty());
     }
 
     #[test]

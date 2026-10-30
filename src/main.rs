@@ -17,7 +17,7 @@ use axum::{
 use moka::sync::Cache;
 use serde::Deserialize;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     env,
     net::SocketAddr,
     sync::{
@@ -37,37 +37,44 @@ const REPOSITORY: &str = "https://github.com/nechel12/proxpulse-judge";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_CONCURRENCY: usize = 512;
 
-/// Rolling 60s window for one key. 0 disables the limiter before this is
-/// called. Pure function for testability: returns Some(retry_after_secs)
-/// when over the limit.
-fn check_limit(q: &mut VecDeque<Instant>, now: Instant, limit: u32) -> Option<u64> {
+struct TokenBucket {
+    tokens: f64,
+    updated: Instant,
+}
+
+impl TokenBucket {
+    fn new(limit: u32, now: Instant) -> Self {
+        Self {
+            tokens: f64::from(limit),
+            updated: now,
+        }
+    }
+}
+
+/// Burst up to `limit`, then refill at `limit` tokens per minute. Pure
+/// function for testability: returns Some(retry_after_secs) when empty.
+fn check_limit(bucket: &mut TokenBucket, now: Instant, limit: u32) -> Option<u64> {
     if limit == 0 {
         return None;
     }
-    while q
-        .front()
-        .map(|t| now.duration_since(*t).as_secs() >= 60)
-        .unwrap_or(false)
-    {
-        q.pop_front();
+    let refill_rate = f64::from(limit) / 60.0;
+    let elapsed = now.duration_since(bucket.updated).as_secs_f64();
+    bucket.tokens = (bucket.tokens + elapsed * refill_rate).min(f64::from(limit));
+    bucket.updated = now;
+    if bucket.tokens >= 1.0 {
+        bucket.tokens -= 1.0;
+        return None;
     }
-    if q.len() as u32 >= limit {
-        if let Some(oldest) = q.front().copied() {
-            return Some((60 - now.duration_since(oldest).as_secs() + 1).max(1));
-        }
-    }
-    q.push_back(now);
-    None
+    Some(((1.0 - bucket.tokens) / refill_rate).ceil().max(1.0) as u64)
 }
 
 struct RateLimit {
     per_minute: u32,
-    /// Bounded per-key deques: moka evicts whole keys, so memory cannot
-    /// grow without limit and there is no global sweep under one lock.
-    hits: Cache<String, Arc<Mutex<VecDeque<Instant>>>>,
+    /// Constant-size per-key buckets; moka bounds the number of keys.
+    hits: Cache<String, Arc<Mutex<TokenBucket>>>,
 }
 
-fn new_hits_cache() -> Cache<String, Arc<Mutex<VecDeque<Instant>>>> {
+fn new_hits_cache() -> Cache<String, Arc<Mutex<TokenBucket>>> {
     Cache::builder()
         .max_capacity(100_000)
         .time_to_idle(Duration::from_secs(120))
@@ -98,12 +105,14 @@ async fn rate_limit_mw(
         let conn = req.extensions().get::<ConnectInfo<SocketAddr>>().cloned();
         let key = self_ip(req.headers(), conn.map(|c| c.0), s.trust_proxy, s.trust_cf);
         let retry = {
-            let entry = s
-                .rate_limit
-                .hits
-                .get_with(key, || Arc::new(Mutex::new(VecDeque::new())));
-            let mut q = entry.lock().unwrap_or_else(|p| p.into_inner());
-            check_limit(&mut q, Instant::now(), s.rate_limit.per_minute)
+            let entry = s.rate_limit.hits.get_with(key, || {
+                Arc::new(Mutex::new(TokenBucket::new(
+                    s.rate_limit.per_minute,
+                    Instant::now(),
+                )))
+            });
+            let mut bucket = entry.lock().unwrap_or_else(|p| p.into_inner());
+            check_limit(&mut bucket, Instant::now(), s.rate_limit.per_minute)
         };
         if let Some(secs) = retry {
             s.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
@@ -756,12 +765,12 @@ async fn main() {
             }
         }
     }
-    let trust_proxy = env::var("TRUST_PROXY").unwrap_or_else(|_| "1".to_string()) == "1";
+    let trust_proxy = env::var("TRUST_PROXY").unwrap_or_else(|_| "0".to_string()) == "1";
     // CF headers are proxy headers too: without TRUST_PROXY the service
     // must resolve the IP from the socket, never from client headers.
     let trust_cf = trust_proxy && env::var("TRUST_CF").unwrap_or_else(|_| "0".to_string()) == "1";
     let rdns_timeout = parse_rdns_timeout(env::var("RDNS_TIMEOUT").ok().as_deref());
-    // requests per IP per rolling minute, 0 = off
+    // burst and sustained requests per IP per minute, 0 = off
     let rate_per_minute: u32 = env::var("RATE_LIMIT_PER_MINUTE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -864,18 +873,33 @@ mod api_tests {
     }
 
     #[test]
-    fn limit_window_allows_then_blocks() {
-        let mut q = VecDeque::new();
+    fn limit_bucket_allows_then_blocks() {
         let now = Instant::now();
-        assert_eq!(check_limit(&mut q, now, 2), None);
-        assert_eq!(check_limit(&mut q, now, 2), None);
-        let retry = check_limit(&mut q, now, 2);
-        assert!(retry.is_some() && retry.unwrap() >= 1 && retry.unwrap() <= 61);
-        // another key has its own queue/budget
-        let mut other = VecDeque::new();
+        let mut bucket = TokenBucket::new(2, now);
+        assert_eq!(check_limit(&mut bucket, now, 2), None);
+        assert_eq!(check_limit(&mut bucket, now, 2), None);
+        assert_eq!(check_limit(&mut bucket, now, 2), Some(30));
+        // another key has its own budget
+        let mut other = TokenBucket::new(2, now);
         assert_eq!(check_limit(&mut other, now, 2), None);
-        // limit = 0 is a no-op even on an empty queue
-        assert_eq!(check_limit(&mut VecDeque::new(), now, 0), None);
+        // limit = 0 is a no-op even on an empty bucket
+        assert_eq!(check_limit(&mut TokenBucket::new(0, now), now, 0), None);
+    }
+
+    #[test]
+    fn limit_bucket_refills_and_reports_exact_delay() {
+        let now = Instant::now();
+        let mut bucket = TokenBucket::new(1, now);
+        assert_eq!(check_limit(&mut bucket, now, 1), None);
+        assert_eq!(check_limit(&mut bucket, now, 1), Some(60));
+        assert_eq!(
+            check_limit(&mut bucket, now + Duration::from_secs(30), 1),
+            Some(30)
+        );
+        assert_eq!(
+            check_limit(&mut bucket, now + Duration::from_secs(60), 1),
+            None
+        );
     }
 
     #[tokio::test]
@@ -897,7 +921,13 @@ mod api_tests {
         );
         let limited = app.clone().oneshot(get_ip()).await.unwrap();
         assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
-        assert!(limited.headers().contains_key("retry-after"));
+        assert_eq!(
+            limited
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("30")
+        );
         // healthz never counts
         for _ in 0..5 {
             assert_eq!(

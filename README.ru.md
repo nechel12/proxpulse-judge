@@ -48,7 +48,8 @@ curl http://127.0.0.1:8000/judge
 docker pull ghcr.io/nechel12/proxpulse-judge:latest
 ```
 
-Теги — `:latest`, `:YYYYMM` и `:vX.Y.Z`. Образы рассчитаны на stateless-хостинг
+Плановые сборки обновляют `:latest` и `:YYYYMM`; ручной релиз дополнительно
+публикует `:vX.Y.Z`. Образы рассчитаны на stateless-хостинг
 (Render и аналоги) и не содержат данных MaxMind. Для VPS со своими
 MaxMind/DB-IP файлами собери `Dockerfile` и смонтируй `./geo`, как описано
 ниже.
@@ -137,10 +138,9 @@ ingress:
 В этом варианте нужно явно выставить `TRUST_CF=1` и оставить
 `TRUST_PROXY=1`; `TRUST_CF` по умолчанию `0` — это безопасно для Caddy/VPS.
 Сервис возьмёт реальный IP из `CF-Connecting-IP` (его ставит сам
-Cloudflare, приоритет выше `X-Forwarded-For`), а все `cf-*`/`cdn-loop`/`true-client-ip`
-заголовки исключаются из
-детекта анонимности — иначе прямая проверка через туннель давала бы
-ложный `transparent`. Проверка:
+Cloudflare, приоритет выше `X-Forwarded-For`). Известные инфраструктурные
+заголовки Cloudflare исключаются из детекта анонимности, а неизвестные `cf-*`
+по-прежнему проверяются на утечку `direct_ip`. Проверка:
 
 ```sh
 MYIP=$(curl -s https://api.ipify.org)
@@ -331,10 +331,10 @@ mount); иначе в лог пишется warning и сервис старту
 |---|---|---|
 | `PORT` | `8000` | порт HTTP |
 | `GEO_DIR` | `/app/geo` | каталог `.mmdb` |
-| `TRUST_PROXY` | `1` | `1` — за реверс-прокси (IP из конца `X-Forwarded-For`), `0` — напрямую (IP из сокета, заголовки не доверяем) |
+| `TRUST_PROXY` | `0` | `1` — за реверс-прокси (IP из конца `X-Forwarded-For`), `0` — напрямую (IP из сокета, заголовки не доверяем); в `.env.example` явно задано `1` |
 | `TRUST_CF` | `0` | `1` — верить `CF-Connecting-IP`; только за Cloudflare/Tunnel и только вместе с `TRUST_PROXY=1`. `0` — игнорировать (безопасно для Caddy/VPS) |
 | `RDNS_TIMEOUT` | `1.5` | таймаут серверного rDNS, сек; ограничивается 0–60, некорректное значение — 1.5 |
-| `RATE_LIMIT_PER_MINUTE` | `6000` | запросов с IP за скользящую минуту, `0` — без лимита |
+| `RATE_LIMIT_PER_MINUTE` | `6000` | token bucket: burst и средний темп запросов с IP в минуту, `0` — без лимита |
 | `RUST_LOG` | `info` | уровень логов |
 
 При `TRUST_PROXY=1` IP клиента берётся из **последней** записи
@@ -383,7 +383,7 @@ HTTP-порт на loopback, задай rate-limit и настрой
 ## Разработка
 
 ```sh
-cargo test        # 56 тестов: логика, geo-парсинг, API, лимиты
+cargo test        # 60 тестов: логика, geo-парсинг, API, лимиты
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
 
 scripts/smoke.sh http://127.0.0.1:8000

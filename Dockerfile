@@ -22,7 +22,7 @@ COPY scripts/download-dbip.sh scripts/docker-entrypoint.sh /app/scripts/
 USER judge
 
 ENV GEO_DIR=/app/geo \
-    TRUST_PROXY=1 \
+    TRUST_PROXY=0 \
     TRUST_CF=0 \
     RUST_LOG=info
 

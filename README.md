@@ -48,8 +48,9 @@ Monthly CI publishes DB-IP Lite images to GHCR:
 docker pull ghcr.io/nechel12/proxpulse-judge:latest
 ```
 
-Tags are `:latest`, `:YYYYMM`, and `:vX.Y.Z`. These images are intended for stateless
-hosts such as Render and do not contain MaxMind data. For a VPS with your own
+Scheduled builds update `:latest` and `:YYYYMM`; manual releases additionally
+publish `:vX.Y.Z`. These images are intended for stateless hosts such as Render
+and do not contain MaxMind data. For a VPS with your own
 MaxMind/DB-IP files, build `Dockerfile` and mount `./geo` as described below.
 
 ## Variant A — Caddy (reverse proxy)
@@ -138,9 +139,9 @@ ingress:
 Set `TRUST_CF=1` explicitly in this variant and keep `TRUST_PROXY=1`;
 `TRUST_CF` defaults to `0`, which is safe for Caddy/VPS. The service takes
 the real IP from `CF-Connecting-IP` (set by Cloudflare itself, takes
-priority over `X-Forwarded-For`), and all
-`cf-*`/`cdn-loop`/`true-client-ip` headers are excluded from anonymity detection — otherwise a
-direct check through the tunnel would give a false `transparent`. Check:
+priority over `X-Forwarded-For`). Known Cloudflare infrastructure headers are
+excluded from anonymity detection, while unknown `cf-*` headers are still checked
+for `direct_ip` leaks. Check:
 
 ```sh
 MYIP=$(curl -s https://api.ipify.org)
@@ -330,10 +331,10 @@ For running without Docker with logs in a file — example
 |---|---|---|
 | `PORT` | `8000` | HTTP port |
 | `GEO_DIR` | `/app/geo` | `.mmdb` directory |
-| `TRUST_PROXY` | `1` | `1` — behind a reverse proxy (IP from the end of `X-Forwarded-For`), `0` — directly exposed (IP from socket, headers untrusted) |
+| `TRUST_PROXY` | `0` | `1` — behind a reverse proxy (IP from the end of `X-Forwarded-For`), `0` — directly exposed (IP from socket, headers untrusted); `.env.example` explicitly sets `1` |
 | `TRUST_CF` | `0` | `1` — trust `CF-Connecting-IP`; only behind Cloudflare/Tunnel and only with `TRUST_PROXY=1`. `0` — ignore (safe for Caddy/VPS) |
 | `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, seconds; clamped to 0–60, invalid values fall back to 1.5 |
-| `RATE_LIMIT_PER_MINUTE` | `6000` | requests per IP per rolling minute, `0` — no limit |
+| `RATE_LIMIT_PER_MINUTE` | `6000` | token-bucket burst and sustained requests per IP per minute, `0` — no limit |
 | `RUST_LOG` | `info` | log level |
 
 With `TRUST_PROXY=1`, the client IP is taken from the **last**
@@ -382,7 +383,7 @@ IP/geo and the rate-limit key.
 ## Development
 
 ```sh
-cargo test        # 56 tests: logic, geo parsing, API, limits
+cargo test        # 60 tests: logic, geo parsing, API, limits
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
 
 scripts/smoke.sh http://127.0.0.1:8000

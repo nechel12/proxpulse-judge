@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.6 — 2026-10-30
+
+### Added
+
+- Run RustSec audits, actionlint, hadolint, and Trivy image scans in CI.
+
+### Security
+
+- Default `TRUST_PROXY` to `0`; deployments behind a reverse proxy must opt in
+  explicitly, so direct exposure cannot spoof client IPs through XFF by default.
+
+### Changed
+
+- Replace per-request rate-limit history with constant-size token buckets while
+  preserving the configured burst and sustained per-minute limits.
+- Scheduled container builds update only `latest` and `YYYYMM`; immutable
+  version tags are published only by manual release builds.
+
+### Fixed
+
+- Check unknown `cf-*` headers for direct-IP leaks instead of treating every
+  Cloudflare-prefixed name as infrastructure.
+- Classify multi-hop XFF chains without a `direct_ip` match as `anonymous`, not
+  `transparent`, and stop treating legal company suffixes as business-IP signals.
+- Return an exact token-bucket `Retry-After` delay instead of up to 61 seconds
+  for an exhausted one-minute window.
+
 ## 0.5.5 — 2026-10-27
 
 ### Security
