@@ -2,5 +2,3 @@
 *.mmdb
 *.mmdb.gz
 .env
-/audit.md
-/FINAL_AUDIT_REPORT.md
