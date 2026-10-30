@@ -414,3 +414,29 @@ The code is licensed under Apache-2.0; see [LICENSE](LICENSE). Geolocation
 databases are not part of the code license: DB-IP Lite is CC BY 4.0, and
 MaxMind GeoLite2 is governed by the GeoLite2 EULA. Database files are
 downloaded separately or baked into the DB-IP image with attribution.
+
+---
+
+## Support the project
+
+ProxPulse Judge is free and open source. If it saves you time, you can support
+further development:
+
+<p align="center">
+  <a href="https://boosty.to/nechel12/donate">
+    <img src="https://img.shields.io/badge/Boosty-Donate-F15F2C?style=for-the-badge&logo=boosty&logoColor=white" alt="Donate via Boosty">
+  </a>
+</p>
+
+### Crypto
+
+| Network | Address |
+|:--------|:--------|
+| **TRON** | `TMM2Cdm4tJx1nKRRq5RCBcdwfn9cHuJZy9` |
+| **TON** | `UQBlVvOfTleWn4pkY384mYWiGyhdHBryoC_N1Si1OSWAxPKl` |
+| **Bitcoin** | `bc1qagjtnutjya2rss3u3ls8ur7qk0u7zutc6t6fwc` |
+| **BNB Smart Chain** | `0x423aF840f67355371bf32480744A84069dfab5ff` |
+
+> [!WARNING]
+> Send only the matching asset on the specified network. Transfers to another
+> network cannot be recovered.

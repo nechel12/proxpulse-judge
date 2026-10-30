@@ -415,3 +415,29 @@ scripts/load.sh http://127.0.0.1:8000 300 32
 геоданных не входят в лицензию кода: DB-IP Lite — CC BY 4.0, MaxMind
 GeoLite2 — GeoLite2 EULA. Файлы баз скачиваются отдельно или вшиваются
 в DB-IP-образ с указанием авторства.
+
+---
+
+## Поддержать проект
+
+ProxPulse Judge — бесплатный проект с открытым исходным кодом. Если он экономит
+тебе время, можешь поддержать разработку:
+
+<p align="center">
+  <a href="https://boosty.to/nechel12/donate">
+    <img src="https://img.shields.io/badge/Boosty-Donate-F15F2C?style=for-the-badge&logo=boosty&logoColor=white" alt="Поддержать на Boosty">
+  </a>
+</p>
+
+### Криптовалюта
+
+| Сеть | Адрес |
+|:-----|:------|
+| **TRON** | `TMM2Cdm4tJx1nKRRq5RCBcdwfn9cHuJZy9` |
+| **TON** | `UQBlVvOfTleWn4pkY384mYWiGyhdHBryoC_N1Si1OSWAxPKl` |
+| **Bitcoin** | `bc1qagjtnutjya2rss3u3ls8ur7qk0u7zutc6t6fwc` |
+| **BNB Smart Chain** | `0x423aF840f67355371bf32480744A84069dfab5ff` |
+
+> [!WARNING]
+> Отправляй только соответствующий актив в указанной сети. Переводы в другую
+> сеть восстановить невозможно.
