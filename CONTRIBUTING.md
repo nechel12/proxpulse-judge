@@ -19,12 +19,13 @@ bash -n scripts/*.sh
 For Docker changes, build the affected image:
 
 ```sh
-docker build -f Dockerfile .
-docker build -f Dockerfile.render .
+docker build .                   # runtime target (VPS, docker compose)
+docker build --target render .   # Render image with baked DB-IP Lite
 ```
 
-`Dockerfile.render` downloads the DB-IP Lite databases and is slower; the main
-`Dockerfile` is enough for most code changes.
+The `render` target downloads the DB-IP Lite databases and is slower; the
+default target is enough for most code changes. Base images are pinned by
+digest; let Dependabot bump them.
 
 Run the service locally:
 
