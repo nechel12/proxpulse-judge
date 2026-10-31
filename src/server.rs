@@ -1,6 +1,6 @@
-//! HTTP serving with the connection-level limits `axum::serve` leaves out:
-//! a request-header read timeout (slowloris) and a cap on open connections,
-//! plus graceful shutdown that drains in-flight requests.
+//! HTTP-сервер с ограничениями уровня соединения, которых нет в `axum::serve`:
+//! таймаут чтения заголовков запроса (slowloris) и лимит открытых соединений,
+//! плюс корректное завершение с дренажом активных запросов.
 use axum::{Router, extract::ConnectInfo};
 use hyper::body::Incoming;
 use hyper_util::{
@@ -12,12 +12,12 @@ use tokio::{net::TcpListener, sync::Semaphore};
 use tower::ServiceExt;
 
 pub struct Limits {
-    /// A client must send the complete request headers within this time.
+    /// Клиент должен отправить все заголовки запроса за это время.
     pub header_read_timeout: Duration,
-    /// Open connections (including idle keep-alive ones) at once; further
-    /// clients wait in the listen backlog.
+    /// Одновременно открытых соединений (включая простаивающие keep-alive); остальные
+    /// клиенты ждут в очереди прослушивания.
     pub max_connections: usize,
-    /// How long shutdown waits for in-flight requests.
+    /// Сколько времени завершение ждёт активные запросы.
     pub shutdown_grace: Duration,
 }
 
@@ -82,8 +82,8 @@ pub async fn serve(
     }
 }
 
-/// Per-connection failures are routine; anything else (e.g. too many open
-/// files) is logged and backed off so the loop does not spin.
+/// Сбои отдельных соединений обычны; всё остальное (например, слишком много открытых
+/// файлов) логируется с задержкой, чтобы цикл не крутился вхолостую.
 async fn accept_error(e: io::Error) {
     if matches!(
         e.kind(),
@@ -149,7 +149,7 @@ mod tests {
     async fn slow_headers_are_cut_off() {
         let (addr, stop, handle) = start(Duration::from_millis(200)).await;
         let mut s = TcpStream::connect(addr).await.unwrap();
-        // headers never finish
+        // заголовки так и не поступили
         s.write_all(b"GET /peer HTTP/1.1\r\nHost: x\r\n")
             .await
             .unwrap();

@@ -1,4 +1,4 @@
-//! Runtime configuration from environment variables.
+//! Конфигурация времени выполнения из переменных окружения.
 use std::{
     env,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -9,17 +9,17 @@ pub struct Config {
     pub port: u16,
     pub bind: IpAddr,
     pub geo_dir: String,
-    /// Behind a reverse proxy: client IP from the end of X-Forwarded-For.
+    /// За обратным прокси: IP клиента из конца X-Forwarded-For.
     pub trust_proxy: bool,
-    /// Behind Cloudflare: client IP from CF-Connecting-IP (needs trust_proxy).
+    /// За Cloudflare: IP клиента из CF-Connecting-IP (требуется trust_proxy).
     pub trust_cf: bool,
     pub rdns_timeout: Duration,
-    /// Burst and sustained requests per client per minute; 0 disables.
+    /// Всплеск и установившаяся частота запросов на клиента в минуту; 0 отключает.
     pub rate_per_minute: u32,
-    /// Lowercased names of headers our own reverse proxy adds; they are
-    /// not attributed to the checked proxy.
+    /// Имена в нижнем регистре для заголовков, которые добавляет наш собственный обратный
+    /// прокси; они не приписываются проверяемому прокси.
     pub edge_headers: Vec<String>,
-    /// Bearer token required by `/metrics`; open when unset.
+    /// Bearer-токен, требуемый для `/metrics`; без него доступ открыт.
     pub metrics_token: Option<String>,
 }
 
@@ -30,8 +30,8 @@ fn var(name: &str) -> Option<String> {
 impl Config {
     pub fn from_env() -> Result<Self, String> {
         let trust_proxy = parse_flag("TRUST_PROXY", var("TRUST_PROXY").as_deref())?;
-        // CF headers are proxy headers too: without TRUST_PROXY the service
-        // must resolve the IP from the socket, never from client headers.
+        // Заголовки CF — тоже прокси-заголовки: без TRUST_PROXY сервис
+        // должен брать IP из сокета и никогда из заголовков клиента.
         let trust_cf = trust_proxy && parse_flag("TRUST_CF", var("TRUST_CF").as_deref())?;
         let mut edge_headers = parse_edge_headers(var("EDGE_HEADERS").as_deref())?;
         if !trust_proxy && !edge_headers.is_empty() {
@@ -60,8 +60,8 @@ fn port() -> u16 {
     var("PORT").and_then(|v| v.parse().ok()).unwrap_or(8000)
 }
 
-/// Where `--healthcheck` connects: loopback for a wildcard bind, otherwise
-/// the bound address itself.
+/// Куда подключается `--healthcheck`: loopback при wildcard-привязке, иначе
+/// сам адрес привязки.
 pub fn probe_addr() -> Option<SocketAddr> {
     let ip = match parse_bind(var("BIND_ADDR").as_deref()).ok()? {
         IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -71,9 +71,9 @@ pub fn probe_addr() -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port()))
 }
 
-/// `1/true/yes/on` or `0/false/no/off` (any case); unset or empty is off.
-/// Anything else is an error: these flags decide which client headers are
-/// trusted, so a typo must not silently change that.
+/// `1/true/yes/on` или `0/false/no/off` (в любом регистре); пустое значение или отсутствие — выключено.
+/// Любое другое значение — ошибка: эти флаги определяют, каким заголовкам клиента
+/// доверять, поэтому опечатка не должна молча менять это.
 pub fn parse_flag(name: &str, raw: Option<&str>) -> Result<bool, String> {
     match raw.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
         None | Some("" | "0" | "false" | "no" | "off") => Ok(false),
@@ -82,8 +82,8 @@ pub fn parse_flag(name: &str, raw: Option<&str>) -> Result<bool, String> {
     }
 }
 
-/// `BIND_ADDR`: listen address, `0.0.0.0` by default; `::` (or `[::]`)
-/// listens on IPv6 as well where the host allows dual-stack sockets.
+/// `BIND_ADDR`: адрес прослушивания, по умолчанию `0.0.0.0`; `::` (или `[::]`)
+/// слушает также IPv6, если хост поддерживает dual-stack сокеты.
 pub fn parse_bind(raw: Option<&str>) -> Result<IpAddr, String> {
     match raw.map(str::trim).filter(|v| !v.is_empty()) {
         None => Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
@@ -95,10 +95,10 @@ pub fn parse_bind(raw: Option<&str>) -> Result<IpAddr, String> {
     }
 }
 
-/// `EDGE_HEADERS`: comma-separated header names that our reverse proxy adds
-/// itself (e.g. nginx `X-Real-IP`). X-Forwarded-For is not accepted here:
-/// its edge hops are already stripped via TRUST_PROXY, and ignoring it
-/// entirely would hide leaks.
+/// `EDGE_HEADERS`: имена заголовков через запятую, которые добавляет наш обратный
+/// прокси (например, `X-Real-IP` в nginx). X-Forwarded-For здесь не принимается:
+/// его граничные переходы уже удаляются через TRUST_PROXY, а полное
+/// игнорирование скрыло бы утечки.
 pub fn parse_edge_headers(raw: Option<&str>) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for name in raw.unwrap_or("").split(',').map(str::trim) {
@@ -119,8 +119,8 @@ pub fn parse_edge_headers(raw: Option<&str>) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Parse `RDNS_TIMEOUT` without panicking on negative/NaN/overflowing
-/// values (Duration::from_secs_f64 panics for those).
+/// Разобрать `RDNS_TIMEOUT` без паники при отрицательных/NaN/переполняющих
+/// значениях (`Duration::from_secs_f64` паникует на них).
 pub fn parse_rdns_timeout(raw: Option<&str>) -> Duration {
     raw.and_then(|v| v.parse::<f64>().ok())
         .filter(|v| v.is_finite() && *v >= 0.0)

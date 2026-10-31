@@ -1,5 +1,5 @@
-//! Process-local counters exported on `/metrics` in the Prometheus text
-//! format; no external metrics dependency is needed.
+//! Локальные для процесса счётчики, экспортируемые в `/metrics` в текстовом
+//! формате Prometheus; внешняя зависимость для метрик не нужна.
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
@@ -13,13 +13,13 @@ pub struct Metrics {
     pub rdns_skipped: AtomicU64,
 }
 
-/// Increment a counter; ordering does not matter for these statistics.
+/// Увеличить счётчик; порядок для этой статистики не важен.
 pub fn inc(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
 }
 
 impl Metrics {
-    /// Text exposition format 0.0.4.
+    /// Текстовый формат экспозиции 0.0.4.
     pub fn render(&self, geo_ready: bool, version: &str) -> String {
         let counters = [
             (

@@ -1,4 +1,4 @@
-//! HTTP API: shared state, middleware and handlers.
+//! HTTP API: общее состояние, middleware и обработчики.
 use axum::{
     Json, Router,
     extract::{ConnectInfo, Query, State},
@@ -72,8 +72,8 @@ impl AppState {
     }
 }
 
-/// Monitoring endpoints bypass the rate and concurrency limits so probes
-/// keep working under load.
+/// Эндпоинты мониторинга обходят лимиты частоты и конкурентности, чтобы пробы
+/// продолжали работать под нагрузкой.
 fn is_monitoring(path: &str) -> bool {
     matches!(path, "/healthz" | "/readyz" | "/metrics")
 }
@@ -153,9 +153,9 @@ async fn timeout_mw(req: axum::extract::Request, next: axum::middleware::Next) -
     }
 }
 
-/// `Cache-Control: no-store` on every per-request response (only the fixed
-/// `/content` reference may be cached) and `nosniff` everywhere, since
-/// several endpoints echo client-controlled header values.
+/// `Cache-Control: no-store` для каждого ответа на отдельный запрос (кэшировать
+/// можно только фиксированный эталон `/content`) и `nosniff` везде, поскольку
+/// несколько эндпоинтов возвращают значения заголовков, контролируемых клиентом.
 async fn response_headers_mw(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -171,8 +171,8 @@ async fn response_headers_mw(
     res
 }
 
-/// Lightweight access logging at debug level; default `RUST_LOG=info`
-/// keeps normal request handling quiet.
+/// Лёгкое логирование доступа на уровне debug; по умолчанию `RUST_LOG=info`
+/// не засоряет обычную обработку запросов.
 async fn access_log_mw(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
@@ -193,10 +193,10 @@ struct JudgeParams {
     direct_ip: Option<String>,
 }
 
-/// Join all values of a header with ", " so duplicate header lines are
-/// handled the same way everywhere. `HeaderMap::get` only returns the
-/// first value, while `iter()` yields the last one per name — that
-/// mismatch used to produce an inconsistent `ip`/`xff_chain` pair.
+/// Объединять все значения заголовка через ", ", чтобы повторяющиеся строки заголовка
+/// обрабатывались одинаково везде. `HeaderMap::get` возвращает только
+/// первое значение, а `iter()` — последнее для каждого имени; это
+/// несоответствие раньше давало несогласованную пару `ip`/`xff_chain`.
 fn joined_header(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut values = headers.get_all(name).iter();
     let first = values.next()?;
@@ -230,10 +230,10 @@ fn self_ip(s: &AppState, headers: &HeaderMap, conn: Option<SocketAddr>) -> Strin
     )
 }
 
-/// Request headers as the client side sent them: X-Forwarded-For keeps
-/// only the entries added before our reverse proxy (dropped when there are
-/// none), and `EDGE_HEADERS` are removed. This view is both echoed and
-/// analysed. Also returns the normalized forwarded chain.
+/// Заголовки запроса в том виде, в каком их отправил клиент: X-Forwarded-For сохраняет
+/// только записи, добавленные до нашего обратного прокси (удаляется, если их
+/// нет), а `EDGE_HEADERS` удаляются. Это представление и возвращается, и
+/// анализируется. Также возвращается нормализованная цепочка пересылки.
 fn proxy_view(
     s: &AppState,
     headers: &HeaderMap,
@@ -294,11 +294,11 @@ fn is_public_ip(addr: IpAddr) -> bool {
     }
 }
 
-/// Server-side rDNS policy: resolve only when the ASN org is missing
-/// (otherwise PTR adds nothing worth a DNS round-trip), only for public
-/// unicast IPs, at most RDNS_MAX_CONCURRENT resolutions at once, results
-/// cached for an hour. The client cannot request rDNS — there is no such
-/// parameter.
+/// Политика серверного rDNS: разрешать только когда ASN-организация отсутствует
+/// (иначе PTR ничего не добавляет к цене DNS-запроса), только для публичных
+/// unicast IP, не более RDNS_MAX_CONCURRENT разрешений одновременно, результаты
+/// кэшируются на час. Клиент не может запросить rDNS — такого
+/// параметра нет.
 async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<String> {
     if state.rdns_timeout.is_zero() || aso.is_some_and(|o| !o.trim().is_empty()) {
         return None;
@@ -311,10 +311,10 @@ async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<Str
     if let Some(hit) = state.ptr_cache.get(&key) {
         return hit;
     }
-    // Keep the permit inside the blocking task: wrapping the JoinHandle
-    // in a timeout only stops waiting, not the resolver call. This bounds
-    // the number of real blocking lookups (and their threads) to the
-    // semaphore, even when callers give up early.
+    // Держать permit внутри блокирующей задачи: оборачивание JoinHandle
+    // в timeout прекращает только ожидание, а не вызов резолвера. Это ограничивает
+    // количество реальных блокирующих запросов (и их потоков)
+    // семафором, даже если вызывающие перестали ждать.
     let Ok(Ok(permit)) = tokio::time::timeout(
         Duration::from_millis(100),
         state.rdns_sem.clone().acquire_owned(),
@@ -332,8 +332,8 @@ async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<Str
     let fut = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let res = dns_lookup::lookup_addr(&addr).ok();
-        // Cache the eventual answer even if the request timed out: the
-        // next request should not repeat a slow/absent lookup.
+        // Кэшировать итоговый ответ, даже если запрос завершился по таймауту: следующий
+        // запрос не должен повторять медленный/отсутствующий запрос.
         cache.insert(key, res.clone());
         res
     });
@@ -394,7 +394,7 @@ async fn readyz(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     }))
 }
 
-/// Compare without an early exit on the first differing byte.
+/// Сравнивать без досрочного выхода при первом различающемся байте.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
@@ -488,8 +488,8 @@ async fn judge(
 ) -> impl IntoResponse {
     let me = self_ip(&s, &headers, Some(conn.0));
     let (view, chain) = proxy_view(&s, &headers, &me);
-    // garbage direct_ip is ignored instead of compared (a header value
-    // could otherwise "match" it and fake a transparent verdict)
+    // мусорный direct_ip игнорируется, а не сравнивается (иначе значение заголовка
+    // могло бы «совпасть» с ним и подделать вердикт transparent)
     let direct = p.direct_ip.as_deref().and_then(normalize_host);
     let level = anonymity_level(&view, direct.as_deref(), s.trust_cf);
 
@@ -633,7 +633,7 @@ mod api_tests {
                 .and_then(|v| v.to_str().ok()),
             Some("no-store")
         );
-        // healthz never counts
+        // healthz никогда не учитывается
         for _ in 0..5 {
             assert_eq!(
                 app.clone()
@@ -664,7 +664,7 @@ mod api_tests {
                 .status(),
             StatusCode::TOO_MANY_REQUESTS
         );
-        // another /64 has its own budget
+        // у другого /64 свой бюджет
         assert_eq!(
             app.oneshot(get_from("2001:db8:1:3::1"))
                 .await
@@ -676,7 +676,7 @@ mod api_tests {
 
     #[tokio::test]
     async fn garbage_direct_ip_is_ignored() {
-        // user-agent "matches" the garbage direct_ip — must NOT fake transparent
+        // user-agent «совпадает» с мусорным direct_ip — НЕ должен подделывать transparent
         let v = json(
             test_app(),
             get_with("/judge?direct_ip=not-an-ip", &[("user-agent", "not-an-ip")]),
@@ -707,7 +707,7 @@ mod api_tests {
                 "{path}"
             );
         }
-        // /content is the fixed integrity reference and may be cached.
+        // /content — фиксированный эталон целостности, его можно кэшировать.
         let res = test_app().oneshot(get_with("/content", &[])).await.unwrap();
         assert!(res.headers().get(CACHE_CONTROL).is_none());
         assert!(res.headers().get(X_CONTENT_TYPE_OPTIONS).is_some());
@@ -806,7 +806,7 @@ mod api_tests {
         .await;
         assert_eq!(v["ip"], "9.9.9.9");
         assert_eq!(v["xff_chain"], serde_json::json!(["1.1.1.1"]));
-        // the echoed XFF is what came from before our edge
+        // возвращаемый XFF — это то, что пришло до нашего edge
         assert_eq!(v["headers"]["x-forwarded-for"], "1.1.1.1");
         assert_eq!(v["anonymity"], "transparent");
     }
@@ -833,7 +833,7 @@ mod api_tests {
 
     #[tokio::test]
     async fn edge_headers_are_not_attributed_to_the_proxy() {
-        // nginx in front adds X-Real-IP = the connecting proxy's exit IP
+        // nginx перед сервисом добавляет X-Real-IP = выходной IP подключающегося прокси
         let req = || {
             get_with(
                 "/judge?direct_ip=1.1.1.1",
@@ -852,7 +852,7 @@ mod api_tests {
 
     #[tokio::test]
     async fn judge_via_cf_tunnel_transparent() {
-        // CF edge: exit 5.6.7.8, proxy leaked 1.1.1.1 into XFF
+        // CF edge: выход 5.6.7.8, прокси утёк 1.1.1.1 в XFF
         let v = json(
             test_app(),
             get_with(
@@ -871,8 +871,8 @@ mod api_tests {
 
     #[tokio::test]
     async fn judge_via_cf_tunnel_direct_is_elite() {
-        // direct check through the tunnel: CF-Connecting-IP == direct IP
-        // must NOT count as a leak
+        // прямая проверка через туннель: CF-Connecting-IP == direct IP
+        // НЕ должно считаться утечкой
         let v = json(
             test_app(),
             get_with(
@@ -915,7 +915,7 @@ mod api_tests {
 
     #[tokio::test]
     async fn rdns_skipped_when_asn_known() {
-        // ASN org present → no DNS round-trip at all (fast, offline-safe)
+        // ASN-организация присутствует → DNS-запроса нет вовсе (быстро и безопасно без сети)
         let state = test_state(
             Path::new(NO_GEO_DIR),
             &test_config(1_000_000, Duration::from_millis(50)),

@@ -23,8 +23,8 @@ TMP="$(mktemp -d "$DIR/.dbip.XXXXXX")"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
-# --retry covers transient CDN/network failures; --max-time prevents a
-# hung connection from blocking container startup forever.
+# --retry покрывает временные сбои CDN/сети; --max-time не даёт
+# зависшему соединению навсегда заблокировать запуск контейнера.
 CURL=(
   curl --fail --location --silent --show-error
   --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 300
@@ -48,8 +48,8 @@ if [ -z "$GOT" ]; then
   exit 1
 fi
 
-# Validate gzip before touching existing files, then move finished files
-# into place atomically. A failed download never leaves a partial .mmdb.
+# Проверить gzip до изменения существующих файлов, затем переместить готовые файлы
+# на место атомарно. Неудачная загрузка никогда не оставляет частичный .mmdb.
 gunzip -t "$TMP/city.gz" "$TMP/asn.gz"
 gunzip -c "$TMP/city.gz" > "$TMP/dbip-city-lite.mmdb"
 gunzip -c "$TMP/asn.gz" > "$TMP/dbip-asn-lite.mmdb"
@@ -58,8 +58,8 @@ gunzip -c "$TMP/asn.gz" > "$TMP/dbip-asn-lite.mmdb"
   exit 1
 }
 
-# Full structural validation before replacing the files used by the
-# service. Skipped when the judge binary is not available (host-only run).
+# Полная структурная проверка перед заменой файлов, используемых
+# сервисом. Пропускается, если бинарник judge недоступен (запуск только на хосте).
 BIN="${JUDGE_BIN:-/app/proxpulse-judge}"
 if [ -x "$BIN" ]; then
   echo "== validating downloaded databases"

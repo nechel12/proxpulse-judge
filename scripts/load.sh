@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Small dependency-free load check. Usage: scripts/load.sh [base-url] [requests] [concurrency]
+# Небольшая проверка нагрузки без зависимостей. Использование: scripts/load.sh [base-url] [requests] [concurrency]
 set -euo pipefail
 
 BASE="${1:-http://127.0.0.1:8000}"

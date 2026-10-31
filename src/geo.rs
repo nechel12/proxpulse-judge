@@ -1,6 +1,6 @@
-//! Local .mmdb pool: GeoLite2 / DB-IP Lite, read fully into RAM.
-//! Records are decoded flexibly (multiple key spellings) so both
-//! MaxMind and DB-IP files work.
+//! Локальный пул .mmdb: GeoLite2 / DB-IP Lite, полностью читается в RAM.
+//! Записи декодируются гибко (несколько вариантов ключей), поэтому работают
+//! и файлы MaxMind, и DB-IP.
 use maxminddb::Reader;
 use serde::Serialize;
 use serde_json::Value;
@@ -68,7 +68,7 @@ fn open_first(dir: &Path, names: &[&str]) -> (Option<Reader<Vec<u8>>>, Option<St
         .map(|n| dir.join(n))
         .filter(|p| p.exists())
         .collect();
-    // glob fallback: any matching file
+    // запасной вариант через glob: любой подходящий файл
     let pattern = if names[0].contains("City") || names[0].contains("city") {
         "city"
     } else if names[0].contains("ASN") || names[0].contains("asn") {
@@ -143,8 +143,8 @@ impl GeoPool {
         &self.sources
     }
 
-    /// Required attribution notices for the loaded databases (inspects both
-    /// filenames and MMDB `database_type` metadata).
+    /// Обязательные уведомления об атрибуции для загруженных баз (проверяет и
+    /// имена файлов, и метаданные `database_type` MMDB).
     pub fn attributions(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
         let mut labels: Vec<String> = self
@@ -214,8 +214,8 @@ impl GeoPool {
         }
         let found = out.has_any_field();
         if found {
-            // A failed city/country reader must not poison a response that
-            // was successfully filled from another source.
+            // Сбой читателя city/country не должен портить ответ, который
+            // был успешно заполнен из другого источника.
             out.error = None;
         }
         if !found && out.error.is_none() {
@@ -228,8 +228,8 @@ impl GeoPool {
         out
     }
 
-    /// Full structural validation of every loaded database. Expensive:
-    /// intended for `--check-geo` after downloads, not per request.
+    /// Полная структурная проверка каждой загруженной базы. Дорого:
+    /// предназначена для `--check-geo` после загрузки, а не для каждого запроса.
     pub fn verify(&self) -> Result<(), String> {
         let mut any = false;
         for (kind, reader) in [
@@ -276,9 +276,9 @@ fn is_empty_record(v: &Value) -> bool {
 }
 
 fn get_str(v: &Value, paths: &[&[&str]]) -> Option<String> {
-    // Try every shape, not just the first path that resolves: e.g. a
-    // `country` object without `names.en` should still fall through to a
-    // flat `country` string or `registered_country`.
+    // Пробовать все формы, а не только первый успешный путь: например,
+    // объект `country` без `names.en` всё равно должен переходить к
+    // плоской строке `country` или `registered_country`.
     paths.iter().find_map(|path| {
         let mut cur = v;
         for key in *path {
@@ -359,7 +359,7 @@ fn apply_city(v: &Value, out: &mut GeoInfo) {
             ],
         );
     }
-    // some ASN-combined DBs also carry org fields
+    // некоторые объединённые с ASN базы также содержат поля org
     if out.aso.is_none() {
         out.aso = get_str(
             v,
@@ -393,10 +393,10 @@ fn apply_asn(v: &Value, out: &mut GeoInfo) {
     }
 }
 
-/// Minimal MaxMind DB writer for tests: an IPv4-only search tree with a
-/// single /24 network and one data record, written as a real `.mmdb` file.
-/// Tests then go through `maxminddb::Reader` (open, metadata, lookup,
-/// decode, verify) instead of feeding hand-built JSON to the field mappers.
+/// Минимальный писатель MaxMind DB для тестов: IPv4-дерево поиска с
+/// одной сетью /24 и одной записью данных, записанное как настоящий файл `.mmdb`.
+/// Затем тесты проходят через `maxminddb::Reader` (open, metadata, lookup,
+/// decode, verify), а не подают вручную собранный JSON в мапперы полей.
 #[cfg(test)]
 pub(crate) mod test_mmdb {
     use serde_json::{Value, json};
@@ -405,10 +405,10 @@ pub(crate) mod test_mmdb {
     const METADATA_MARKER: &[u8] = b"\xab\xcd\xefMaxMind.com";
     const PREFIX_LEN: u32 = 24;
 
-    /// Control byte (plus extended type and size bytes) of one data field.
+    /// Управляющий байт (плюс байты расширенного типа и размера) одного поля данных.
     fn control(out: &mut Vec<u8>, kind: u8, size: usize) {
-        // Sizes up to 28 fit in the control byte; the one-byte extension
-        // (29 + next byte) is enough for test records.
+        // Размеры до 28 помещаются в управляющий байт; однобайтового расширения
+        // (29 + следующий байт) достаточно для тестовых записей.
         assert!(size < 285, "value too large for the test writer");
         let type_bits = if kind > 7 { 0 } else { kind };
         out.push((type_bits << 5) | size.min(29) as u8);
@@ -420,10 +420,10 @@ pub(crate) mod test_mmdb {
         }
     }
 
-    /// JSON to MMDB types: string → utf8_string, float → double,
-    /// non-negative integer → uint32, object → map, array → array.
-    /// Records are decoded leniently into JSON; metadata is decoded into
-    /// typed fields and is written by [`write`] with exact integer types.
+    /// JSON в типы MMDB: string → utf8_string, float → double,
+    /// неотрицательное целое → uint32, object → map, array → array.
+    /// Записи декодируются нестрого в JSON; метаданные декодируются в
+    /// типизированные поля и записываются [`write`] с точными целочисленными типами.
     fn encode(out: &mut Vec<u8>, v: &Value) {
         match v {
             Value::String(s) => {
@@ -456,11 +456,11 @@ pub(crate) mod test_mmdb {
         }
     }
 
-    /// Write a database whose only network is `network`/24.
+    /// Записать базу, единственная сеть которой — `network`/24.
     pub(crate) fn write(path: &Path, database_type: &str, network: [u8; 4], record: &Value) {
-        // One node per prefix bit: the matching branch descends, the other
-        // one is the "no data" record (== node_count). The last matching
-        // branch points at offset 0 of the data section.
+        // Один узел на каждый бит префикса: совпадающая ветвь идёт вниз, другая
+        // ведёт в запись «нет данных» (== node_count). Последняя совпадающая
+        // ветвь указывает на смещение 0 в секции данных.
         let node_count = PREFIX_LEN;
         let empty = node_count;
         let data = node_count + 16;
@@ -478,14 +478,14 @@ pub(crate) mod test_mmdb {
                 [empty, next]
             };
             for r in records {
-                // 24-bit records
+                // 24-битные записи
                 out.extend_from_slice(&r.to_be_bytes()[1..]);
             }
         }
         out.extend_from_slice(&[0; 16]);
         encode(&mut out, record);
         out.extend_from_slice(METADATA_MARKER);
-        // metadata map: 6 typed integers + 3 JSON-shaped entries
+        // карта метаданных: 6 целых с типами + 3 записи в форме JSON
         control(&mut out, 7, 9);
         let integers: [(&str, u8, Vec<u8>); 6] = [
             (
@@ -519,7 +519,7 @@ pub(crate) mod test_mmdb {
         std::fs::write(path, out).expect("write test mmdb");
     }
 
-    /// MaxMind-shaped City and ASN databases covering 203.0.113.0/24.
+    /// Базы City и ASN в форме MaxMind, покрывающие 203.0.113.0/24.
     pub(crate) fn write_city_and_asn(dir: &Path) {
         write(
             &dir.join("GeoLite2-City.mmdb"),
@@ -542,7 +542,7 @@ pub(crate) mod test_mmdb {
         );
     }
 
-    /// Per-test directory under the system temp dir, removed on drop.
+    /// Каталог для каждого теста в системном temp-каталоге, удаляется при drop.
     pub(crate) struct TempDir(PathBuf);
 
     impl TempDir {
@@ -601,22 +601,22 @@ mod tests {
         assert_eq!(info.asn, Some(64500));
         assert_eq!(info.aso.as_deref(), Some("Example Hosting GmbH"));
 
-        // IPv4-mapped IPv6 resolves through the IPv4 tree
+        // IPv4-mapped IPv6 разрешается через дерево IPv4
         let mapped = pool.lookup("::ffff:203.0.113.7");
         assert_eq!(mapped.country_code.as_deref(), Some("DE"));
-        // databases are loaded, the address is simply not covered
+        // базы загружены, адрес просто не покрыт
         assert_eq!(
             pool.lookup("198.51.100.1").error.as_deref(),
             Some("not found")
         );
-        // IPv6 in IPv4-only databases is a reported error, not a panic
+        // IPv6 в базах только с IPv4 — сообщаемая ошибка, а не паника
         assert!(pool.lookup("2001:db8::1").error.is_some());
     }
 
     #[test]
     fn mismatched_database_type_is_ignored() {
-        // Named like a City database but carrying ASN data: must not be
-        // used for city lookups (and is not picked up as ASN either).
+        // Название как у базы City, но с данными ASN: не должна
+        // использоваться для поиска city (и также не выбирается как ASN).
         let dir = TempDir::new("geo-type-mismatch");
         test_mmdb::write(
             &dir.path().join("GeoLite2-City.mmdb"),

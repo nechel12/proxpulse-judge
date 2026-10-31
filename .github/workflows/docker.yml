@@ -12,7 +12,7 @@
 # Actions закреплены по SHA; Dependabot обновляет их вместе с комментарием.
 # Пакет обычно наследует public от публичного репо; если Render ругнётся
 # Image Pull Failed — проверь видимость: профиль → Packages →
-# proxpulse-judge → Package settings → Change visibility → public.
+# затем proxpulse-judge → Package settings → Change visibility → public.
 name: docker
 
 on:
@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # ветка stable
         with:
           toolchain: stable
           components: clippy,rustfmt
@@ -91,7 +91,7 @@ jobs:
         id: msrv
         run: echo "version=$(awk -F'"' '/^rust-version = / { print $2; exit }' Cargo.toml)" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # ветка stable
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
 
@@ -142,7 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # tag verification needs origin/main
+          fetch-depth: 0 # для проверки тега нужен origin/main
 
       # Релиз — только подписанный ключом docs/proxpulse-release.pub тег на
       # main, совпадающий с версией в Cargo.toml и описанный в CHANGELOG.
@@ -359,7 +359,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # ветка stable
         with:
           toolchain: stable
           targets: ${{ matrix.target }}

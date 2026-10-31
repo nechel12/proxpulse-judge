@@ -3,7 +3,7 @@
 #             если .mmdb нет, entrypoint сам скачает DB-IP Lite;
 #   render  — free-hosting (Render и т.п.): DB-IP Lite вшиты в образ,
 #             диск не нужен, контейнер stateless, curl внутри нет.
-#             docker build --target render .
+#             Пример: docker build --target render .
 # DB-IP Lite распространяется под CC BY 4.0 — атрибуция обязательна:
 # "IP Geolocation by DB-IP" со ссылкой https://db-ip.com
 # (см. также GET / — лицензии отдаются самим сервисом).
@@ -17,7 +17,7 @@
 FROM rust:1.99-trixie@sha256:09027f873d45b8ecd1dc86f1fa13b7a62b875c961f017a0e331267b350430137 AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-# prefetch deps for layer caching
+# предварительно скачать зависимости для кэширования слоя
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
     cargo build --release --locked && rm -rf src target/release/.fingerprint/proxpulse-judge* target/release/proxpulse-judge*
 COPY src ./src

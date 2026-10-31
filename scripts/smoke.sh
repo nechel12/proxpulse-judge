@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Smoke-test a running judge instance. Usage: scripts/smoke.sh [base-url]
-# SMOKE_EXPECT_GEO=1 additionally requires loaded geo databases and a real
-# lookup. The probe IP goes in X-Forwarded-For, so a local container needs
-# TRUST_PROXY=1; behind a reverse proxy the caller's own public IP is used.
-# SMOKE_METRICS_TOKEN is sent to /metrics when the instance sets METRICS_TOKEN.
+# Проверить запущенный экземпляр judge. Использование: scripts/smoke.sh [base-url]
+# SMOKE_EXPECT_GEO=1 дополнительно требует загруженные базы геоданных и реальный
+# поиск. Проверяемый IP передаётся в X-Forwarded-For, поэтому локальному контейнеру
+# нужен TRUST_PROXY=1; за обратным прокси используется собственный публичный IP вызывающего.
+# SMOKE_METRICS_TOKEN отправляется в /metrics, если на экземпляре задан METRICS_TOKEN.
 set -euo pipefail
 
 BASE="${1:-http://127.0.0.1:8000}"
@@ -39,7 +39,7 @@ AUTH=()
 if [ -n "${SMOKE_METRICS_TOKEN:-}" ]; then
   AUTH=(-H "Authorization: Bearer $SMOKE_METRICS_TOKEN")
 fi
-# ${AUTH[@]+...}: an empty array is "unbound" under set -u in bash < 4.4 (macOS)
+# `${AUTH[@]+...}`: пустой массив считается «unbound» при `set -u` в bash < 4.4 (macOS)
 curl -fsS ${AUTH[@]+"${AUTH[@]}"} -o "$TMP/body" "$BASE/metrics" || fail "/metrics: request failed"
 grep -q 'proxpulse_requests_total' "$TMP/body" || fail "/metrics: missing counter"
 grep -q 'proxpulse_build_info' "$TMP/body" || fail "/metrics: missing build info"
