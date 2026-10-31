@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Start an image, wait for /healthz, then run smoke.sh and load.sh against it.
-# Usage: scripts/container-smoke.sh <image> [extra docker run args...]
-# SMOKE_EXPECT_GEO=1 is passed through to smoke.sh (needs TRUST_PROXY=1).
+# Запустить образ, дождаться /healthz, затем выполнить smoke.sh и load.sh против него.
+# Использование: scripts/container-smoke.sh <image> [дополнительные аргументы docker run...]
+# SMOKE_EXPECT_GEO=1 передаётся в smoke.sh (требуется TRUST_PROXY=1).
 set -euo pipefail
 
 IMAGE="${1:?usage: $0 <image> [docker run args...]}"

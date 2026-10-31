@@ -1,9 +1,9 @@
-//! proxpulse-judge: self-hosted proxy-check backend.
+//! proxpulse-judge: самостоятельно размещаемый бэкенд для проверки прокси.
 //!
-//! One GET /judge replaces several third-party calls (ip-api, httpbin):
-//! it sees the proxy exit IP, resolves geo from LOCAL .mmdb files,
-//! echoes headers for anonymity analysis and serves fixed content
-//! for tamper checks.
+//! Один GET /judge заменяет несколько сторонних вызовов (ip-api, httpbin):
+//! он видит выходной IP прокси, определяет геоданные по ЛОКАЛЬНЫМ файлам .mmdb,
+//! возвращает заголовки для анализа анонимности и отдаёт фиксированный контент
+//! для проверки на подмену.
 mod app;
 mod config;
 mod geo;
@@ -18,15 +18,15 @@ use app::{AppState, REQUEST_TIMEOUT, VERSION};
 use config::Config;
 use geo::GeoPool;
 
-/// Request headers must arrive within this time (slowloris guard).
+/// Заголовки запроса должны поступить за это время (защита от slowloris).
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
-/// Open connections at once, idle keep-alive ones included.
+/// Одновременно открытых соединений, включая простаивающие keep-alive.
 const MAX_CONNECTIONS: usize = 4096;
 
 fn healthcheck(addr: SocketAddr) -> bool {
     use std::io::{Read, Write};
-    // Two seconds for connect and two for read stays below the Docker
-    // healthcheck timeout (5s) instead of potentially taking 8s.
+    // Две секунды на подключение и две на чтение укладываются в таймаут
+    // healthcheck Docker (5 с), а не могут занять до 8 с.
     let mut s = match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(s) => s,
         Err(_) => return false,
@@ -49,7 +49,7 @@ fn healthcheck(addr: SocketAddr) -> bool {
             break;
         }
     }
-    // Check the status line, not an arbitrary "200" elsewhere in headers.
+    // Проверяется строка статуса, а не произвольное «200» где-то в заголовках.
     let text = String::from_utf8_lossy(&resp);
     text.lines()
         .next()
@@ -61,15 +61,15 @@ async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c().await.ok();
     };
-    // Docker sends SIGTERM on `stop` — without this arm the container
-    // would die mid-request instead of draining gracefully.
+    // Docker отправляет SIGTERM при `stop` — без этой ветки контейнер
+    // завершался бы посреди запроса вместо плавного дренажа.
     #[cfg(unix)]
     let terminate = async {
         match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
             Ok(mut s) => {
                 s.recv().await;
             }
-            // no SIGTERM source: never resolve
+            // нет источника SIGTERM: никогда не разрешать
             Err(_) => std::future::pending::<()>().await,
         }
     };

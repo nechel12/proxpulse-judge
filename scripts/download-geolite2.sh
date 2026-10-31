@@ -3,7 +3,7 @@
 # ЛИЦЕНЗИЯ: скачиванием ты принимаешь GeoLite EULA
 # (https://www.maxmind.com/en/geolite/eula, включает аспекты CC BY-SA 4.0)
 # + обязательно указание авторства MaxMind. Нужен бесплатный аккаунт:
-# https://www.maxmind.com/en/geolite2/signup -> "Manage License Keys".
+# https://www.maxmind.com/en/geolite2/signup → раздел «Manage License Keys».
 set -euo pipefail
 if [ -z "${MAXMIND_LICENSE_KEY:-}" ]; then
   echo "error: задай MAXMIND_LICENSE_KEY (ключ из личного кабинета MaxMind)" >&2
@@ -26,13 +26,13 @@ CURL=(
 for EDITION in GeoLite2-City GeoLite2-ASN GeoLite2-Country; do
   echo "== $EDITION"
   TAR="$TMP/${EDITION}.tar.gz"
-  # Pass the URL via stdin config so MAXMIND_LICENSE_KEY does not appear in ps/cmdline.
+  # Передать URL через stdin-конфиг, чтобы MAXMIND_LICENSE_KEY не появлялся в ps/cmdline.
   "${CURL[@]}" -o "$TAR" --config - <<EOF
 url = "https://download.maxmind.com/app/geoip_download?edition_id=${EDITION}&license_key=${MAXMIND_LICENSE_KEY}&suffix=tar.gz"
 EOF
   mkdir -p "$TMP/${EDITION}"
-  # Extract into a temp dir first; no --wildcards (portable, and a
-  # truncated tar cannot clobber the mmdb that the service is using).
+  # Сначала распаковать во временный каталог; без --wildcards (переносимо, и
+  # усечённый tar не может затереть mmdb, используемую сервисом).
   tar -xzf "$TAR" -C "$TMP/${EDITION}" --strip-components=1 --no-same-owner
   test -s "$TMP/${EDITION}/${EDITION}.mmdb" || {
     echo "error: ${EDITION}.mmdb missing or empty in archive" >&2

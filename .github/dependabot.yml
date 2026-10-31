@@ -1,7 +1,7 @@
 version: 2
 updates:
-  # Minor/patch crate updates arrive as one weekly PR; major bumps stay
-  # separate because they usually need code changes.
+  # Обновления minor/patch для crate приходят одним еженедельным PR; major-обновления
+  # остаются отдельно, потому что обычно требуют изменений кода.
   - package-ecosystem: cargo
     directory: "/"
     schedule:
@@ -11,7 +11,7 @@ updates:
       cargo-minor-patch:
         update-types: [minor, patch]
 
-  # Actions are pinned by SHA; Dependabot bumps the SHA and the version comment.
+  # Actions закреплены по SHA; Dependabot обновляет SHA и комментарий с версией.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
@@ -20,7 +20,7 @@ updates:
       github-actions:
         patterns: ["*"]
 
-  # Base images in Dockerfile are pinned by tag and digest.
+  # Базовые образы в Dockerfile закреплены по тегу и digest.
   - package-ecosystem: docker
     directory: "/"
     schedule:

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Print the CHANGELOG.md section of one version (without its heading).
-# Usage: scripts/release-notes.sh <X.Y.Z> [changelog]
-# Fails when the section is missing or empty, so a release cannot ship
-# without notes.
+# Вывести раздел CHANGELOG.md одной версии (без его заголовка).
+# Использование: scripts/release-notes.sh <X.Y.Z> [changelog]
+# Завершается ошибкой, если раздел отсутствует или пуст, поэтому релиз не может
+# выйти без заметок.
 set -euo pipefail
 
 VERSION="${1:?usage: $0 <X.Y.Z> [changelog]}"

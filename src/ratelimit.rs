@@ -1,4 +1,4 @@
-//! Per-client token-bucket rate limiting.
+//! Ограничение частоты запросов на клиента через token bucket.
 use moka::sync::Cache;
 use std::{
     net::{IpAddr, Ipv6Addr},
@@ -20,8 +20,8 @@ impl TokenBucket {
     }
 }
 
-/// Burst up to `limit`, then refill at `limit` tokens per minute. Pure
-/// function for testability: returns Some(retry_after_secs) when empty.
+/// Всплеск до `limit`, затем пополнение со скоростью `limit` токенов в минуту. Чистая
+/// функция для тестируемости: возвращает Some(retry_after_secs), когда токенов нет.
 pub fn check_limit(bucket: &mut TokenBucket, now: Instant, limit: u32) -> Option<u64> {
     if limit == 0 {
         return None;
@@ -37,9 +37,9 @@ pub fn check_limit(bucket: &mut TokenBucket, now: Instant, limit: u32) -> Option
     Some(((1.0 - bucket.tokens) / refill_rate).ceil().max(1.0) as u64)
 }
 
-/// Bucket key for a resolved client IP. An IPv6 client usually controls a
-/// whole /64, so per-address buckets would let it rotate source addresses
-/// and bypass the limit; IPv6 clients share one bucket per /64.
+/// Ключ корзины для определённого IP клиента. Клиент IPv6 обычно контролирует
+/// целый /64, поэтому корзины на каждый адрес позволили бы ему менять исходные адреса
+/// и обходить лимит; клиенты IPv6 делят одну корзину на /64.
 pub fn bucket_key(ip: &str) -> String {
     match ip.parse::<IpAddr>().map(|a| a.to_canonical()) {
         Ok(IpAddr::V6(v6)) => {
@@ -53,12 +53,12 @@ pub fn bucket_key(ip: &str) -> String {
 
 pub struct RateLimit {
     per_minute: u32,
-    /// Constant-size per-key buckets; moka bounds the number of keys.
+    /// Корзины постоянного размера на каждый ключ; moka ограничивает число ключей.
     hits: Cache<String, Arc<Mutex<TokenBucket>>>,
 }
 
 impl RateLimit {
-    /// `per_minute` is both the burst and the sustained rate; 0 disables.
+    /// `per_minute` задаёт и всплеск, и установившуюся скорость; 0 отключает лимит.
     pub fn new(per_minute: u32) -> Self {
         Self {
             per_minute,
@@ -69,7 +69,7 @@ impl RateLimit {
         }
     }
 
-    /// Take one token for `client_ip`; Some(retry_after_secs) when empty.
+    /// Взять один токен для `client_ip`; Some(retry_after_secs), когда токенов нет.
     pub fn check(&self, client_ip: &str) -> Option<u64> {
         if self.per_minute == 0 {
             return None;
@@ -96,10 +96,10 @@ mod tests {
         assert_eq!(check_limit(&mut bucket, now, 2), None);
         assert_eq!(check_limit(&mut bucket, now, 2), None);
         assert_eq!(check_limit(&mut bucket, now, 2), Some(30));
-        // another key has its own budget
+        // у другого ключа свой бюджет
         let mut other = TokenBucket::new(2, now);
         assert_eq!(check_limit(&mut other, now, 2), None);
-        // limit = 0 is a no-op even on an empty bucket
+        // limit = 0 ничего не делает даже при пустой корзине
         assert_eq!(check_limit(&mut TokenBucket::new(0, now), now, 0), None);
     }
 
@@ -128,7 +128,7 @@ mod tests {
             "2001:db8:1:2::/64"
         );
         assert_eq!(bucket_key("2001:db8:1:3::1"), "2001:db8:1:3::/64");
-        // an IPv4-mapped address is the IPv4 client, not an IPv6 network
+        // адрес, отображённый из IPv4, — это IPv4-клиент, а не сеть IPv6
         assert_eq!(bucket_key("::ffff:9.9.9.9"), "9.9.9.9");
     }
 

@@ -1,12 +1,12 @@
-//! Pure logic of proxpulse-judge: no I/O, fully unit-testable.
+//! Чистая логика proxpulse-judge: без I/O, полностью покрыта unit-тестами.
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-/// Fixed tamper-check content. Never change bytes without bumping
-/// [`CONTENT_VERSION`], otherwise checkers comparing against an old
-/// baseline will see "modified".
+/// Фиксированный контент проверки на подмену. Никогда не менять байты без повышения
+/// [`CONTENT_VERSION`], иначе проверяющие, сравнивающие со старым
+/// эталоном, увидят «modified».
 pub const CONTENT_VERSION: u8 = 1;
 pub const FIXED_CONTENT: &[u8] =
     b"{\"proxpulse\":\"judge\",\"v\":1,\"payload\":\"0123456789abcdef0123456789abcdef0123456789abcdef\"}";
@@ -25,9 +25,9 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// Headers a reverse proxy (Caddy/nginx) adds itself. They must NOT be
-/// treated as proxy telltales, otherwise every check behind a reverse
-/// proxy would look "anonymous".
+/// Заголовки, которые обратный прокси (Caddy/nginx) добавляет сам. Они НЕ должны
+/// считаться признаками прокси, иначе любая проверка за обратным
+/// прокси выглядела бы «anonymous».
 const INFRA_HEADERS: &[&str] = &[
     "x-forwarded-proto",
     "x-forwarded-host",
@@ -55,9 +55,9 @@ pub fn split_xff(value: Option<&str>) -> Vec<String> {
     }
 }
 
-/// Normalize one XFF/CF address entry: trim, unwrap "[v6]:port",
-/// strip a ":port" suffix from bare IPv4 ("1.2.3.4:5678" — some
-/// proxies append it, but it is not part of the address).
+/// Нормализовать одну запись адреса XFF/CF: обрезать пробелы, развернуть «[v6]:port»,
+/// удалить суффикс «:port» у чистого IPv4 («1.2.3.4:5678» — некоторые
+/// прокси дописывают его, но это не часть адреса).
 pub fn clean_host(s: &str) -> String {
     let t = s.trim();
     if let Some(stripped) = t.strip_prefix('[') {
@@ -77,9 +77,9 @@ pub fn clean_host(s: &str) -> String {
     t.to_string()
 }
 
-/// Canonical textual form of an address taken from a header:
-/// trims, unwraps `[v6]:port` / `v4:port`, validates, canonicalizes
-/// IPv4-mapped IPv6 (`::ffff:a.b.c.d` → `a.b.c.d`), and re-prints it.
+/// Каноническая текстовая форма адреса из заголовка:
+/// обрезает, разворачивает `[v6]:port` / `v4:port`, проверяет, канонизирует
+/// IPv4-mapped IPv6 (`::ffff:a.b.c.d` → `a.b.c.d`) и печатает заново.
 pub fn normalize_host(s: &str) -> Option<String> {
     clean_host(s)
         .parse::<std::net::IpAddr>()
@@ -95,9 +95,9 @@ fn is_ipv6_char(c: char) -> bool {
     c.is_ascii_hexdigit() || c == ':' || c == '.'
 }
 
-/// True when `ip` occurs in `text` on character boundaries (so
-/// `1.2.3.4` does not match inside `1.2.3.40`, and `::1` does not
-/// match inside `::10`), including non-canonical IPv6 or IPv4-mapped forms.
+/// Истина, когда `ip` встречается в `text` на границах символов (так
+/// `1.2.3.4` не совпадает внутри `1.2.3.40`, а `::1` не
+/// совпадает внутри `::10`), включая неканонические IPv6 и IPv4-mapped формы.
 fn ip_in_text(text: &str, ip: &std::net::IpAddr) -> bool {
     let ip = ip.to_canonical();
     let needle = ip.to_string().to_ascii_lowercase();
@@ -120,11 +120,11 @@ fn ip_in_text(text: &str, ip: &std::net::IpAddr) -> bool {
         .any(|cand| cand == needle)
 }
 
-/// Resolve the real client IP (= proxy exit IP when checked via proxy).
+/// Определить реальный IP клиента (= выходной IP прокси при проверке через прокси).
 ///
-/// Priority: `CF-Connecting-IP` (set by Cloudflare edge, single IP,
-/// only when trust_cf) → last X-Forwarded-For entry (appended by our
-/// own reverse proxy, only when trust_proxy) → socket address.
+/// Приоритет: `CF-Connecting-IP` (устанавливается edge Cloudflare, один IP,
+/// только при trust_cf) → последняя запись X-Forwarded-For (добавленная нашим
+/// обратным прокси, только при trust_proxy) → адрес сокета.
 pub fn client_ip(
     cf_ip: Option<&str>,
     xff: Option<&str>,
@@ -146,22 +146,22 @@ pub fn client_ip(
     normalize_host(socket_ip).unwrap_or_else(|| socket_ip.to_string())
 }
 
-/// XFF entries added BEFORE our reverse proxy (i.e. by the checked proxy).
+/// Записи XFF, добавленные ДО нашего обратного прокси (то есть проверяемым прокси).
 ///
-/// How our edge appends determines the cleanup:
-/// - direct edge (Caddy/nginx): appends the client itself, which is also
-///   what [`client_ip`] resolves — pop that single trailing entry;
-/// - CDN in front of the edge (Cloudflare in front of Render, or in front
-///   of Caddy): the CDN writes the client and the hops below it append
-///   their own addresses after it (live Render shape:
-///   `[client, CF-egress, inner-LB]`), so everything from the first client
-///   entry onward is our infrastructure — truncate there. The CDN branch
-///   only fires when the client was actually resolved from a valid
-///   `CF-Connecting-IP`, otherwise the legacy single pop applies and the
-///   Caddy/VPS behaviour is unchanged.
+/// Способ, которым наш edge добавляет записи, определяет очистку:
+/// - прямой edge (Caddy/nginx): добавляет самого клиента, который также
+///   определяется [`client_ip`] — удалить одну последнюю запись;
+/// - CDN перед edge (Cloudflare перед Render или перед
+///   Caddy): CDN записывает клиента, а переходы ниже добавляют
+///   свои адреса после него (реальная форма Render:
+///   `[client, CF-egress, inner-LB]`), поэтому всё начиная с первого клиентского
+///   перехода — наша инфраструктура; обрезать там. Ветка CDN
+///   срабатывает только когда клиент действительно определён из валидного
+///   `CF-Connecting-IP`, иначе применяется прежнее удаление одной записи и
+///   поведение Caddy/VPS не меняется.
 ///
-/// Raw XFF tokens added BEFORE our reverse proxy (including non-IP placeholders
-/// such as Squid's `unknown`).
+/// Сырые токены XFF, добавленные ДО нашего обратного прокси (включая не-IP
+/// заполнители, такие как `unknown` у Squid).
 pub fn pre_edge_xff(
     xff: Option<&str>,
     client: &str,
@@ -174,27 +174,27 @@ pub fn pre_edge_xff(
         return raw;
     }
     let client = normalize_host(client).unwrap_or_else(|| client.to_string());
-    // CDN branch: same condition as the CF priority in [`client_ip`]; the
-    // equality guard keeps this fail-closed if a caller ever passes an
-    // inconsistent client.
+    // Ветка CDN: то же условие, что приоритет CF в [`client_ip`];
+    // проверка равенства сохраняет отказобезопасность, если вызывающий когда-либо передаст
+    // несогласованного клиента.
     let cdn_client = if trust_cf {
         cf_ip.and_then(normalize_host)
     } else {
         None
     };
     if cdn_client.as_deref() == Some(client.as_str()) {
-        // The CDN appends the client address to the proxy-supplied chain,
-        // so the *last* occurrence marks where our infrastructure begins.
-        // The first occurrence may be a value the checked proxy prepended
-        // itself, and truncating there would hide leaks after it.
+        // CDN добавляет адрес клиента к цепочке, предоставленной прокси,
+        // поэтому *последнее* вхождение отмечает начало нашей инфраструктуры.
+        // Первое вхождение может быть значением, которое проверяемый прокси добавил
+        // сам, и обрезка там скрыла бы утечки после него.
         if let Some(pos) = raw
             .iter()
             .rposition(|e| normalize_host(e).as_deref() == Some(client.as_str()))
         {
             raw.truncate(pos);
         }
-        // Drop any remaining copies of the edge/client address (an elite
-        // proxy may have put its own exit into XFF as well).
+        // Удалить все оставшиеся копии адреса edge/клиента (elite-
+        // прокси мог также поместить свой выходной IP в XFF).
         raw.retain(|e| normalize_host(e).as_deref() != Some(client.as_str()));
         return raw;
     }
@@ -204,7 +204,7 @@ pub fn pre_edge_xff(
     raw
 }
 
-/// Normalized IPs of pre-edge XFF entries; non-IP placeholders are dropped.
+/// Нормализованные IP записей XFF до edge; не-IP заполнители отбрасываются.
 pub fn normalize_chain(entries: &[String]) -> Vec<String> {
     entries.iter().filter_map(|e| normalize_host(e)).collect()
 }
@@ -222,8 +222,8 @@ fn forwarded_chain(
 
 fn is_infra(name: &str, trust_cf: bool) -> bool {
     let n = name.to_ascii_lowercase();
-    // Only headers controlled by Cloudflare are infrastructure. Arbitrary
-    // cf-* names can pass through the edge and must still be checked for leaks.
+    // Только заголовки, контролируемые Cloudflare, являются инфраструктурой. Произвольные
+    // имена cf-* могут проходить через edge и всё равно должны проверяться на утечки.
     INFRA_HEADERS.contains(&n.as_str()) || (trust_cf && CF_INFRA_HEADERS.contains(&n.as_str()))
 }
 
@@ -246,12 +246,12 @@ fn is_telltale(name: &str, trust_cf: bool) -> bool {
         || n.starts_with("x-proxy")
 }
 
-/// elite | anonymous | transparent.
+/// уровни: elite | anonymous | transparent.
 ///
-/// `headers` — lowercased request headers as seen by judge, with the
-/// reverse-proxy-added XFF entries already removed (see
-/// [`pre_edge_xff`]). `direct_ip` — checker's own IP learned via a
-/// direct /ip call; without it only proxy presence can be determined.
+/// `headers` — заголовки запроса в нижнем регистре, как их видит judge, при этом
+/// добавленные обратным прокси записи XFF уже удалены (см.
+/// [`pre_edge_xff`]). `direct_ip` — собственный IP проверяющего, полученный через
+/// прямой вызов /ip; без него можно определить только наличие прокси.
 pub fn anonymity_level(
     headers: &HashMap<String, String>,
     direct_ip: Option<&str>,
@@ -300,7 +300,7 @@ const HOSTING_KW: &[&str] = &[
     "virtual",
     "hypervisor",
 ];
-/// Well-known hosters/clouds whose org names carry no generic keyword.
+/// Известные хостинги/облака, в названиях организаций которых нет общего ключевого слова.
 const HOSTING_VENDORS: &[&str] = &[
     "hetzner",
     "ovh",
@@ -353,9 +353,9 @@ const BUSINESS_KW: &[&str] = &[
     "hotel",
 ];
 
-/// Whole-word match: "inc" must not match "Zinc", "host" must not match
-/// "ghost". Multi-word keywords are matched as phrases with the same
-/// boundary rule.
+/// Совпадение по целым словам: «inc» не должно совпадать с «Zinc», «host» не должен совпадать
+/// с «ghost». Многословные ключевые слова сопоставляются как фразы с тем же
+/// правилом границ.
 fn contains_word(text: &str, needle: &str) -> bool {
     let needle = needle.trim();
     if needle.is_empty() {
@@ -391,22 +391,22 @@ pub struct TypeSignals {
     pub note: Option<String>,
 }
 
-/// Heuristic IP type. Local data can't prove residential-vs-business
-/// the way paid ASN DBs do — `TypeSignals` exposes WHY, so callers
-/// (and humans) can judge.
+/// Эвристический тип IP. Локальные данные не могут доказать residential-vs-business
+/// так, как платные ASN-базы, — `TypeSignals` показывает ПОЧЕМУ, чтобы вызывающие
+/// (и люди) могли судить.
 pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (String, TypeSignals) {
     let hay_org = org.unwrap_or("").to_string();
     let hay_all = format!("{} {}", hay_org, rdns.unwrap_or(""));
     let hosting_kw = hits(&hay_org, HOSTING_KW);
     let low = hay_org.to_ascii_lowercase();
-    // single-word vendors match whole tokens only: substring matching
-    // would flag e.g. "Shaw Communications" via "aws". Multi-word
-    // vendors ("oracle cloud") are long enough for substring matching.
+    // однословные вендоры совпадают только целыми токенами: совпадение подстроки
+    // отмечало бы, например, «Shaw Communications» из-за «aws». Многословные
+    // вендоры («oracle cloud») достаточно длинны для совпадения подстроки.
     let tokens: Vec<&str> = low
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .collect();
-    // Google's residential Fiber ISP shares the cloud vendor token.
+    // Residential Fiber ISP от Google делит токен облачного вендора.
     let google_fiber = contains_word(&low, "google fiber");
     let hosting_vendor: Vec<String> = HOSTING_VENDORS
         .iter()
@@ -478,7 +478,7 @@ mod tests {
     fn client_ip_resolution() {
         assert_eq!(client_ip(None, None, "9.9.9.9", false, true), "9.9.9.9");
         assert_eq!(client_ip(None, None, "9.9.9.9", true, true), "9.9.9.9");
-        // proxy forwarded 1.2.3.4, Caddy appended exit 5.6.7.8
+        // прокси переслал 1.2.3.4, Caddy добавил выходной 5.6.7.8
         assert_eq!(
             client_ip(None, Some("1.2.3.4, 5.6.7.8"), "10.0.0.1", true, true),
             "5.6.7.8"
@@ -487,7 +487,7 @@ mod tests {
 
     #[test]
     fn client_ip_prefers_cf_header() {
-        // Cloudflare edge: real exit in CF-Connecting-IP, socket is the tunnel
+        // Edge Cloudflare: настоящий выход в CF-Connecting-IP, сокет — туннель
         assert_eq!(
             client_ip(
                 Some("5.6.7.8"),
@@ -498,7 +498,7 @@ mod tests {
             ),
             "5.6.7.8"
         );
-        // garbage CF value is ignored, XFF fallback still works
+        // мусорное значение CF игнорируется, запасной вариант через XFF работает
         assert_eq!(
             client_ip(
                 Some("not-an-ip"),
@@ -509,7 +509,7 @@ mod tests {
             ),
             "5.6.7.8"
         );
-        // trust_cf off → CF header ignored
+        // trust_cf выключен → заголовок CF игнорируется
         assert_eq!(
             client_ip(Some("5.6.7.8"), None, "172.21.0.1", false, false),
             "172.21.0.1"
@@ -531,10 +531,10 @@ mod tests {
 
     #[test]
     fn chain_strips_cdn_infra_hops() {
-        // Live Render shape: CF wrote the client, then CF-egress and the
-        // inner LB appended their hops. All infra must go, whatever leaked
-        // before it must stay.
-        // Direct check.
+        // Реальная форма Render: CF записал клиента, затем CF-egress и
+        // внутренний LB добавили свои переходы. Вся инфраструктура должна исчезнуть, что утекло
+        // до неё — остаться.
+        // Прямая проверка.
         assert!(
             forwarded_chain(
                 Some("1.2.3.4, 172.71.146.141, 10.29.121.232"),
@@ -545,7 +545,7 @@ mod tests {
             )
             .is_empty()
         );
-        // Elite proxy: only its exit IP precedes the infra hops.
+        // Elite-прокси: только его выходной IP предшествует инфраструктурным переходам.
         assert!(
             forwarded_chain(
                 Some("9.9.9.9, 172.71.146.141, 10.29.121.232"),
@@ -556,7 +556,7 @@ mod tests {
             )
             .is_empty()
         );
-        // Transparent proxy: the leaked IP survives, infra does not.
+        // Прозрачный прокси: утёкший IP остаётся, инфраструктура — нет.
         assert_eq!(
             forwarded_chain(
                 Some("1.2.3.4, 9.9.9.9, 172.71.146.141, 10.29.121.232"),
@@ -567,7 +567,7 @@ mod tests {
             ),
             vec!["1.2.3.4"]
         );
-        // Single-hop CDN shape strips as well.
+        // Односкачковая форма CDN также удаляется.
         assert!(
             forwarded_chain(
                 Some("9.9.9.9, 5.6.7.8"),
@@ -578,8 +578,8 @@ mod tests {
             )
             .is_empty()
         );
-        // Inconsistent caller input (client not from CF header):
-        // fail closed, legacy single pop applies.
+        // Несогласованный ввод вызывающего (клиент не из заголовка CF):
+        // отказобезопасно, применяется прежнее удаление одной записи.
         assert_eq!(
             forwarded_chain(Some("9.9.9.9"), "1.1.1.1", true, true, Some("9.9.9.9")),
             vec!["9.9.9.9"]
@@ -588,9 +588,9 @@ mod tests {
 
     #[test]
     fn render_direct_check_is_elite_not_transparent() {
-        // Full live Render-shaped request: CF-Connecting-IP is the client,
-        // XFF carries [client, CF-egress, inner-LB]. Must be elite,
-        // not transparent — with the real direct_ip and without it.
+        // Полный реальный запрос формы Render: CF-Connecting-IP — клиент,
+        // XFF содержит [client, CF-egress, inner-LB]. Должно быть elite,
+        // не transparent — с реальным direct_ip и без него.
         let h = map(&[
             ("cf-connecting-ip", "1.1.1.1"),
             ("cf-ray", "abc123"),
@@ -615,9 +615,9 @@ mod tests {
 
     #[test]
     fn render_true_client_ip_is_not_a_leak() {
-        // Live Render headers: True-Client-IP duplicates the exit IP on
-        // every request. In a direct check direct_ip == exit IP, so without
-        // the exclusion this misdetects as transparent.
+        // Реальные заголовки Render: True-Client-IP дублирует выходной IP при
+        // каждом запросе. При прямой проверке direct_ip == выходной IP, поэтому без
+        // этого исключения это ошибочно определяется как transparent.
         let h = map(&[
             ("cf-connecting-ip", "1.1.1.1"),
             ("true-client-ip", "1.1.1.1"),
@@ -677,8 +677,8 @@ mod tests {
 
     #[test]
     fn cf_direct_check_is_elite_not_transparent() {
-        // direct check through CF tunnel: CF-Connecting-IP always equals
-        // the exit IP by construction — must not count as a leak
+        // прямая проверка через туннель CF: CF-Connecting-IP всегда равен
+        // выходному IP по построению — не должно считаться утечкой
         let h = map(&[
             ("cf-connecting-ip", "1.1.1.1"),
             ("cf-ray", "abc123"),
@@ -691,7 +691,7 @@ mod tests {
 
     #[test]
     fn cf_transparent_still_detected() {
-        // proxy leaked 1.1.1.1 into XFF, CF appended exit 5.6.7.8
+        // прокси утёк 1.1.1.1 в XFF, CF добавил выходной 5.6.7.8
         let h = map(&[
             ("cf-connecting-ip", "5.6.7.8"),
             ("x-forwarded-for", "1.1.1.1"),
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn vendor_substring_no_false_positive() {
-        // "Shaw" contains "aws" — must NOT match the vendor list
+        // «Shaw» содержит «aws» — НЕ должно совпадать со списком вендоров
         let (t, s) = classify_ip(Some("Shaw Communications"), None);
         assert!(s.hosting_vendor.is_empty());
         assert_eq!(t, "residential");
@@ -745,7 +745,7 @@ mod tests {
 
     #[test]
     fn classify_keywords_respect_word_boundaries() {
-        // "Ghost" contains "host".
+        // «Ghost» содержит «host».
         let (t, _) = classify_ip(Some("Ghost Productions"), None);
         assert_eq!(t, "residential");
         let (t, _) = classify_ip(Some("Acme Bank"), None);
@@ -786,7 +786,7 @@ mod tests {
         assert_eq!(clean_host("  1.2.3.4  "), "1.2.3.4");
         assert_eq!(clean_host("[::1]:8080"), "::1");
         assert_eq!(clean_host("2001:db8::1"), "2001:db8::1");
-        // sloppy proxy appends source port: exit still resolves, chain strips
+        // небрежный прокси добавляет исходный порт: выход всё равно определяется, цепочка очищается
         assert_eq!(
             client_ip(None, Some("9.9.9.9:40000, 5.6.7.8"), "x", true, true),
             "5.6.7.8"
@@ -807,7 +807,7 @@ mod tests {
             client_ip(None, Some("1.2.3.4:80, garbage"), "9.9.9.9", true, true),
             "9.9.9.9"
         );
-        // a valid address with a source port still resolves
+        // валидный адрес с исходным портом всё равно определяется
         assert_eq!(
             client_ip(None, Some("1.2.3.4:80"), "9.9.9.9", true, true),
             "1.2.3.4"
@@ -837,7 +837,7 @@ mod tests {
         );
         let h = map(&[("x-forwarded-for", "2001:db8::10")]);
         assert_eq!(anonymity_level(&h, Some("2001:db8::1"), true), "anonymous");
-        // Non-canonical IPv6 in non-XFF headers must also be detected as a leak
+        // Неканонический IPv6 в заголовках, отличных от XFF, также должен обнаруживаться как утечка
         let h = map(&[("x-real-ip", "2001:0db8:0:0:0:0:0:1")]);
         assert_eq!(
             anonymity_level(&h, Some("2001:db8::1"), true),
@@ -891,9 +891,9 @@ mod tests {
 
     #[test]
     fn cdn_chain_uses_last_client_occurrence() {
-        // Realistic CF append: the proxy prepended its own exit (same as
-        // CF-Connecting-IP) before the leaked real IP; CF appended the
-        // client again, then infra hops followed.
+        // Реалистичное добавление CF: прокси добавил свой выходной IP (совпадающий с
+        // CF-Connecting-IP) перед утёкшим реальным IP; CF снова добавил
+        // клиента, затем последовали инфраструктурные переходы.
         assert_eq!(
             forwarded_chain(
                 Some("9.9.9.9, 1.2.3.4, 9.9.9.9, 172.71.146.141, 10.29.121.232"),
@@ -904,7 +904,7 @@ mod tests {
             ),
             vec!["1.2.3.4"]
         );
-        // Elite proxy: exit only, CF appended it again -> nothing leaks.
+        // Elite-прокси: только выход, CF добавил его снова -> ничего не утекает.
         assert!(
             forwarded_chain(
                 Some("9.9.9.9, 9.9.9.9, 172.71.146.141, 10.29.121.232"),

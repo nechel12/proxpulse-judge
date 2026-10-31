@@ -12,8 +12,8 @@ BIN="${JUDGE_BIN:-/app/proxpulse-judge}"
 
 mkdir -p "$GEO_DIR" 2>/dev/null || true
 
-# A valid .mmdb is much larger than 1 KiB; this also ignores leftover
-# empty/partial files that would otherwise suppress the fallback forever.
+# Валидный .mmdb намного больше 1 КиБ; это также игнорирует оставшиеся
+# пустые/частичные файлы, которые иначе навсегда подавляли бы запасной вариант.
 has_mmdb() {
   find "$GEO_DIR" -maxdepth 1 -type f -name '*.mmdb' -size +1k -print -quit 2>/dev/null \
     | grep -q .
@@ -25,7 +25,7 @@ elif [ ! -w "$GEO_DIR" ]; then
   echo "[entrypoint] WARNING: $GEO_DIR is not writable (read-only mount?) — skipping DB-IP fallback; geo fields will be empty" >&2
 else
   echo "[entrypoint] no .mmdb in $GEO_DIR — downloading DB-IP Lite fallback..."
-  # Don't hold container startup forever on a black-holed connection.
+  # Не держать запуск контейнера вечно при «чёрной дыре» соединения.
   if GEO_DIR="$GEO_DIR" timeout 600 bash "$SCRIPT_DIR/download-dbip.sh"; then
     echo "[entrypoint] fallback DBs ready"
   else
