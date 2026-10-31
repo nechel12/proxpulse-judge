@@ -66,14 +66,13 @@ pub fn clean_host(s: &str) -> String {
         }
         return t.to_string();
     }
-    if let Some((ip, port)) = t.rsplit_once(':') {
-        if !port.is_empty()
-            && port.chars().all(|c| c.is_ascii_digit())
-            && ip.split('.').count() == 4
-            && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
-        {
-            return ip.to_string();
-        }
+    if let Some((ip, port)) = t.rsplit_once(':')
+        && !port.is_empty()
+        && port.chars().all(|c| c.is_ascii_digit())
+        && ip.split('.').count() == 4
+        && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+    {
+        return ip.to_string();
     }
     t.to_string()
 }
@@ -133,17 +132,15 @@ pub fn client_ip(
     trust_proxy: bool,
     trust_cf: bool,
 ) -> String {
-    if trust_cf {
-        if let Some(cf) = cf_ip.and_then(normalize_host) {
-            return cf;
-        }
+    if trust_cf && let Some(cf) = cf_ip.and_then(normalize_host) {
+        return cf;
     }
     if trust_proxy {
         let chain = split_xff(xff);
-        if let Some(last) = chain.last() {
-            if let Some(ip) = normalize_host(last) {
-                return ip;
-            }
+        if let Some(last) = chain.last()
+            && let Some(ip) = normalize_host(last)
+        {
+            return ip;
         }
     }
     normalize_host(socket_ip).unwrap_or_else(|| socket_ip.to_string())
@@ -207,17 +204,20 @@ pub fn pre_edge_xff(
     raw
 }
 
-pub fn forwarded_chain(
+/// Normalized IPs of pre-edge XFF entries; non-IP placeholders are dropped.
+pub fn normalize_chain(entries: &[String]) -> Vec<String> {
+    entries.iter().filter_map(|e| normalize_host(e)).collect()
+}
+
+#[cfg(test)]
+fn forwarded_chain(
     xff: Option<&str>,
     client: &str,
     trust_proxy: bool,
     trust_cf: bool,
     cf_ip: Option<&str>,
 ) -> Vec<String> {
-    pre_edge_xff(xff, client, trust_proxy, trust_cf, cf_ip)
-        .into_iter()
-        .filter_map(|e| normalize_host(&e))
-        .collect()
+    normalize_chain(&pre_edge_xff(xff, client, trust_proxy, trust_cf, cf_ip))
 }
 
 fn is_infra(name: &str, trust_cf: bool) -> bool {
@@ -249,8 +249,8 @@ fn is_telltale(name: &str, trust_cf: bool) -> bool {
 /// elite | anonymous | transparent.
 ///
 /// `headers` — lowercased request headers as seen by judge, with the
-/// reverse-proxy-added last XFF entry already removed (see
-/// [`forwarded_chain`]). `direct_ip` — checker's own IP learned via a
+/// reverse-proxy-added XFF entries already removed (see
+/// [`pre_edge_xff`]). `direct_ip` — checker's own IP learned via a
 /// direct /ip call; without it only proxy presence can be determined.
 pub fn anonymity_level(
     headers: &HashMap<String, String>,
@@ -535,23 +535,27 @@ mod tests {
         // inner LB appended their hops. All infra must go, whatever leaked
         // before it must stay.
         // Direct check.
-        assert!(forwarded_chain(
-            Some("1.2.3.4, 172.71.146.141, 10.29.121.232"),
-            "1.2.3.4",
-            true,
-            true,
-            Some("1.2.3.4"),
-        )
-        .is_empty());
+        assert!(
+            forwarded_chain(
+                Some("1.2.3.4, 172.71.146.141, 10.29.121.232"),
+                "1.2.3.4",
+                true,
+                true,
+                Some("1.2.3.4"),
+            )
+            .is_empty()
+        );
         // Elite proxy: only its exit IP precedes the infra hops.
-        assert!(forwarded_chain(
-            Some("9.9.9.9, 172.71.146.141, 10.29.121.232"),
-            "9.9.9.9",
-            true,
-            true,
-            Some("9.9.9.9"),
-        )
-        .is_empty());
+        assert!(
+            forwarded_chain(
+                Some("9.9.9.9, 172.71.146.141, 10.29.121.232"),
+                "9.9.9.9",
+                true,
+                true,
+                Some("9.9.9.9"),
+            )
+            .is_empty()
+        );
         // Transparent proxy: the leaked IP survives, infra does not.
         assert_eq!(
             forwarded_chain(
@@ -564,14 +568,16 @@ mod tests {
             vec!["1.2.3.4"]
         );
         // Single-hop CDN shape strips as well.
-        assert!(forwarded_chain(
-            Some("9.9.9.9, 5.6.7.8"),
-            "9.9.9.9",
-            true,
-            true,
-            Some("9.9.9.9"),
-        )
-        .is_empty());
+        assert!(
+            forwarded_chain(
+                Some("9.9.9.9, 5.6.7.8"),
+                "9.9.9.9",
+                true,
+                true,
+                Some("9.9.9.9"),
+            )
+            .is_empty()
+        );
         // Inconsistent caller input (client not from CF header):
         // fail closed, legacy single pop applies.
         assert_eq!(
@@ -899,13 +905,15 @@ mod tests {
             vec!["1.2.3.4"]
         );
         // Elite proxy: exit only, CF appended it again -> nothing leaks.
-        assert!(forwarded_chain(
-            Some("9.9.9.9, 9.9.9.9, 172.71.146.141, 10.29.121.232"),
-            "9.9.9.9",
-            true,
-            true,
-            Some("9.9.9.9"),
-        )
-        .is_empty());
+        assert!(
+            forwarded_chain(
+                Some("9.9.9.9, 9.9.9.9, 172.71.146.141, 10.29.121.232"),
+                "9.9.9.9",
+                true,
+                true,
+                Some("9.9.9.9"),
+            )
+            .is_empty()
+        );
     }
 }

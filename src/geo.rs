@@ -175,7 +175,7 @@ impl GeoPool {
                     ip: ip.to_string(),
                     error: Some("invalid ip".to_string()),
                     ..Default::default()
-                }
+                };
             }
         };
         let mut out = GeoInfo {
@@ -191,15 +191,16 @@ impl GeoPool {
                 Err(e) => out.error = Some(format!("city: {}", short_err(&e.to_string()))),
             }
         }
-        if out.country.is_none() && out.country_code.is_none() {
-            if let Some(reader) = &self.country {
-                match lookup_value(reader, addr) {
-                    Ok(Some(v)) if !is_empty_record(&v) => {
-                        apply_city(&v, &mut out);
-                    }
-                    Ok(_) => {}
-                    Err(e) => out.error = Some(format!("country: {}", short_err(&e.to_string()))),
+        if out.country.is_none()
+            && out.country_code.is_none()
+            && let Some(reader) = &self.country
+        {
+            match lookup_value(reader, addr) {
+                Ok(Some(v)) if !is_empty_record(&v) => {
+                    apply_city(&v, &mut out);
                 }
+                Ok(_) => {}
+                Err(e) => out.error = Some(format!("country: {}", short_err(&e.to_string()))),
             }
         }
         if let Some(reader) = &self.asn {
@@ -305,15 +306,15 @@ fn get_u32(v: &Value, paths: &[&[&str]]) -> Option<u32> {
         for key in *path {
             cur = cur.get(*key)?;
         }
-        if let Some(n) = cur.as_u64() {
-            if n <= u32::MAX as u64 {
-                return Some(n as u32);
-            }
+        if let Some(n) = cur.as_u64()
+            && n <= u32::MAX as u64
+        {
+            return Some(n as u32);
         }
-        if let Some(n) = cur.as_i64() {
-            if (0..=u32::MAX as i64).contains(&n) {
-                return Some(n as u32);
-            }
+        if let Some(n) = cur.as_i64()
+            && (0..=u32::MAX as i64).contains(&n)
+        {
+            return Some(n as u32);
         }
         None
     })
@@ -398,7 +399,7 @@ fn apply_asn(v: &Value, out: &mut GeoInfo) {
 /// decode, verify) instead of feeding hand-built JSON to the field mappers.
 #[cfg(test)]
 pub(crate) mod test_mmdb {
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
     use std::path::{Path, PathBuf};
 
     const METADATA_MARKER: &[u8] = b"\xab\xcd\xefMaxMind.com";
@@ -571,8 +572,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const MAXMIND_ATTRIBUTION: &str =
-        "This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com";
+    const MAXMIND_ATTRIBUTION: &str = "This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com";
 
     #[test]
     fn real_mmdb_files_are_read_and_verified() {
