@@ -44,7 +44,7 @@ the optional database download fallback, the Render image does not.
 
 Requires [Docker](https://docs.docker.com/get-docker/) with Compose, plus
 `bash`, `curl`, and `gzip` for the database download script. For Docker-free
-development, use [Rust](https://rustup.rs/) 1.88 or newer.
+development, [Rust](https://rustup.rs/) 1.88 or newer is required.
 
 ```sh
 git clone https://github.com/nechel12/proxpulse-judge.git
@@ -76,8 +76,8 @@ gh attestation verify oci://ghcr.io/nechel12/proxpulse-judge:latest --owner nech
 ```
 
 These images are intended for stateless hosts such as Render and do not
-contain MaxMind data. For a VPS with your own MaxMind/DB-IP files, build the
-default `Dockerfile` target and mount `./geo` as described below.
+contain MaxMind data. For a VPS with local MaxMind/DB-IP files, the default
+`Dockerfile` target is built and `./geo` is mounted as described below.
 
 Each [GitHub release](https://github.com/nechel12/proxpulse-judge/releases)
 also ships static Linux binaries (`x86_64`, `aarch64`) with `SHA256SUMS` and
@@ -85,17 +85,17 @@ attestations.
 
 > [!IMPORTANT]
 > The image defaults to `TRUST_PROXY=0` and `TRUST_CF=0`: the client IP is the
-> socket address. Set both for your topology (`render.yaml` already sets them
-> to `1` for Render). Never set `TRUST_CF=1` unless every request reaches the
-> container through Cloudflare: otherwise any client can spoof its IP, geo and
-> rate-limit key with a `CF-Connecting-IP` header.
+> socket address. Both values must match the deployment topology (`render.yaml`
+> already sets them to `1` for Render). `TRUST_CF=1` is safe only when every
+> request reaches the container through Cloudflare: otherwise any client can
+> spoof its IP, geo and rate-limit key with a `CF-Connecting-IP` header.
 
 ## Variant A — Caddy (reverse proxy)
 
-You need **your own domain** (no HTTPS certificate without one).
-The subdomain can be anything, e.g. `check.yourdomain.com`:
-in your registrar's DNS panel create an **A-record** for the subdomain
-pointing at the server IP; ports **80 and 443** must face the internet.
+A **dedicated domain** is required (no HTTPS certificate is issued without
+one). The subdomain can be anything, e.g. `check.yourdomain.com`: an
+**A-record** for the subdomain is created in the registrar's DNS panel,
+pointing at the server IP, and ports **80 and 443** must face the internet.
 Example in `Caddyfile.example`:
 
 ```caddy
@@ -109,7 +109,7 @@ check.yourdomain.com {
 ```
 
 Caddy issues a Let's Encrypt certificate automatically on first request.
-Check:
+Verification:
 
 ```sh
 curl https://check.yourdomain.com/healthz
@@ -119,14 +119,14 @@ curl https://check.yourdomain.com/healthz
 `X-Forwarded-For` from the checked proxy is dropped by default, so the judge
 would not see a real-IP leak passed via XFF. Trusting XFF from all clients is
 safe only because the judge listens on `127.0.0.1` and is reachable solely
-through Caddy. Keep `TRUST_CF=0` (the default) for this variant: there is no
-Cloudflare here, and CF headers are trivially forgeable.
+through Caddy. `TRUST_CF=0` (the default) is required for this variant: there
+is no Cloudflare here, and CF headers are trivially forgeable.
 
-If Cloudflare sits **in front of** Caddy, do not strip the CF headers: set
-`trusted_proxies` to Cloudflare's ranges instead of `0.0.0.0/0`, restrict
-ports 80/443 to Cloudflare IPs (or use Authenticated Origin Pulls, since
-`trusted_proxies` only governs `X-Forwarded-*`, not `CF-Connecting-IP`), set
-`TRUST_CF=1`, and make sure `TRUST_PROXY=1`.
+If Cloudflare sits **in front of** Caddy, the CF headers are not stripped:
+`trusted_proxies` is set to Cloudflare's ranges instead of `0.0.0.0/0`, ports
+80/443 are restricted to Cloudflare IPs (or Authenticated Origin Pulls is
+used, since `trusted_proxies` only governs `X-Forwarded-*`, not
+`CF-Connecting-IP`), and both `TRUST_CF=1` and `TRUST_PROXY=1` are required.
 
 ### nginx instead of Caddy
 
@@ -140,11 +140,11 @@ proxy_set_header True-Client-IP "";
 ```
 
 nginx appends the connecting address to the proxy's `X-Forwarded-For`, so
-`TRUST_PROXY=1` works as with Caddy. Do **not** add `X-Real-IP`, `Via`, or
-`Forwarded` there (many nginx templates do): the judge treats them as proxy
-telltales, and every check would come out `anonymous`. If your configuration
-must add them, list them in `EDGE_HEADERS` (e.g. `EDGE_HEADERS=x-real-ip`) so
-they are not attributed to the checked proxy.
+`TRUST_PROXY=1` works as with Caddy. `X-Real-IP`, `Via`, and `Forwarded` are
+**not** added there (many nginx templates do): the judge treats them as proxy
+telltales, and every check would come out `anonymous`. If a configuration
+requires them, they are listed in `EDGE_HEADERS` (e.g.
+`EDGE_HEADERS=x-real-ip`) so they are not attributed to the checked proxy.
 
 ## Variant B — Cloudflare Tunnel (no Caddy, no open ports)
 
@@ -153,11 +153,12 @@ cloudflared tunnel --url http://127.0.0.1:8000
 ```
 
 or no config-file commands at all — via the Cloudflare website:
-**Zero Trust → Networks → Tunnels → Create a tunnel**, pick a name,
-on the **Public Hostname** tab add: subdomain `check`, your domain,
-service `http://proxpulse-judge:8000` (container on the shared network, see below)
-or `http://127.0.0.1:8000` (cloudflared on the host). Pass the token from
-the website into the connector container:
+**Zero Trust → Networks → Tunnels → Create a tunnel**; a tunnel name is
+chosen, and the **Public Hostname** tab contains: subdomain `check`, the
+domain (e.g. `check.yourdomain.com`), service
+`http://proxpulse-judge:8000` (container on the shared network; details below) or
+`http://127.0.0.1:8000` (cloudflared on the host). The token from the website
+is passed into the connector container:
 
 ```sh
 docker run -d --name cf-tunnel --restart unless-stopped \
@@ -188,15 +189,15 @@ ingress:
 > # both must be visible: proxpulse-judge and cf-tunnel
 > ```
 >
-> and in ingress/service use `http://proxpulse-judge:8000`.
+> with ingress/service pointing to `http://proxpulse-judge:8000`.
 > cloudflared on the host itself simply goes to `http://127.0.0.1:8000`.
 
-Set `TRUST_CF=1` explicitly in this variant and keep `TRUST_PROXY=1`;
+`TRUST_CF=1` and `TRUST_PROXY=1` are required explicitly in this variant;
 `TRUST_CF` defaults to `0`, which is safe for Caddy/VPS. The service takes
 the real IP from `CF-Connecting-IP` (set by Cloudflare itself, takes
 priority over `X-Forwarded-For`). Known Cloudflare infrastructure headers are
 excluded from anonymity detection, while unknown `cf-*` headers are still checked
-for `direct_ip` leaks. Check:
+for `direct_ip` leaks. Verification:
 
 ```sh
 MYIP=$(curl -s https://api.ipify.org)
@@ -211,7 +212,7 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 A ready image with embedded DB-IP Lite rebuilds itself every month
 (`.github/workflows/docker.yml` → `ghcr.io/nechel12/proxpulse-judge:latest`),
 no disk needed. The button creates the service from `render.yaml` with
-a free `https://<name>.onrender.com` domain. Use the resulting URL in
+a free `https://<name>.onrender.com` domain. The resulting URL is used in
 the checker. No Cloudflare Tunnel is needed in this setup: Render
 provides both TLS and the domain.
 
@@ -230,19 +231,19 @@ Free-plan notes:
   (Environment). The `PORT` variable is provided by Render and must not
   be overridden.
 - The image carries DB-IP Lite only: the GeoLite2 EULA restricts public
-  redistribution, so MaxMind data is not baked into the published image. For
-  MaxMind, use the VPS + volume variant above.
+  redistribution, so MaxMind data is not baked into the published image.
+  MaxMind requires the VPS + volume variant above.
 
 Database updates (the image rebuilds on the 3rd of every month):
 
-1. **Fork + auto-hook.** Fork the repository, enable workflows in the
-   fork's Actions tab (disabled by default), add a `RENDER_DEPLOY_HOOK`
-   secret (Render dashboard → service → Settings → Deploy Hook), and point
-   the fork's `render.yaml` at your own
+1. **Fork + auto-hook.** A fork of the repository is created, workflows are
+   enabled in the fork's Actions tab (disabled by default), a
+   `RENDER_DEPLOY_HOOK` secret is added (Render dashboard → service →
+   Settings → Deploy Hook), and the fork's `render.yaml` points at its own
    `ghcr.io/<owner>/proxpulse-judge:latest`. Fresh images are then published
    to the fork's GHCR and trigger redeploys automatically. Limitation: the
-   schedule is disabled after 60 days without activity in the fork — run
-   the workflow manually from time to time (Run workflow).
+   schedule is disabled after 60 days without activity in the fork — the
+   workflow is run manually from time to time (Run workflow).
 2. **Manually.** Render dashboard → service → Manual Deploy →
    Deploy latest reference. Geo data changes slowly, so manual updates
    are usually sufficient.
@@ -270,8 +271,8 @@ passthrough and `/healthz` as the health check are required.
 | GET | `/metrics` | Prometheus text counters (optionally behind `METRICS_TOKEN`) |
 
 `/headers` and `/judge` echo the headers as the checked proxy sent them: the
-`X-Forwarded-For` hops your own reverse proxy appended and `EDGE_HEADERS` are
-removed, so only what came from the proxy side is shown.
+`X-Forwarded-For` hops appended by the deployment's reverse proxy and
+`EDGE_HEADERS` are removed, so only what came from the proxy side is shown.
 
 Example `/judge` response through an anonymous proxy, with DB-IP databases:
 
@@ -317,13 +318,13 @@ Example `/judge` response through an anonymous proxy, with DB-IP databases:
 
 | `anonymity` | Meaning |
 |---|---|
-| `transparent` | Your `direct_ip` appears in the forwarded chain or in any other header value (in any IPv4/IPv6 spelling): the proxy leaks your real IP. |
+| `transparent` | The checker's `direct_ip` appears in the forwarded chain or in any other header value (in any IPv4/IPv6 spelling): the proxy leaks the real client IP. |
 | `anonymous` | No leak, but the proxy reveals itself: `X-Forwarded-For` entries (even `unknown`), or `Via`, `Forwarded`, `X-Real-IP`, `Proxy-*`, `X-Proxy*` headers. |
 | `elite` | Neither: the request looks like a direct one. |
 
 ```mermaid
 flowchart TD
-    A[Request through the checked proxy] --> B["Drop what our own edge added:<br/>XFF hops (TRUST_PROXY), CF headers (TRUST_CF), EDGE_HEADERS"]
+    A[Request through the checked proxy] --> B["Removing what the deployment edge added:<br/>XFF hops (TRUST_PROXY), CF headers (TRUST_CF), EDGE_HEADERS"]
     B --> C{"direct_ip in XFF<br/>or in any header value?"}
     C -- yes --> T[transparent]
     C -- no --> D{"XFF entries left, or Via / Forwarded /<br/>X-Real-IP / Proxy-* headers?"}
@@ -339,12 +340,12 @@ organization (and the PTR record when the organization is unknown);
 
 ## Using it from the checker
 
-1. Direct `GET /ip` request — your own IP (`direct_ip`).
-2. `GET /judge?direct_ip=<yours>` through a proxy — the `anonymity` field:
+1. Direct `GET /ip` request — the checker's own IP (`direct_ip`).
+2. `GET /judge?direct_ip=<checker-ip>` through a proxy — the `anonymity` field:
    `elite` (leaks nothing), `anonymous` (proxy visible, IP hidden),
    `transparent` (real IP leaked).
-3. Integrity: `GET /content` directly and through the proxy, compare bytes
-   (or `content_sha256` from `/judge`).
+3. Integrity: bytes from `GET /content` directly and through the proxy are
+   compared (or `content_sha256` from `/judge`).
 4. Geo and type are already inside `/judge`. There is no rDNS parameter:
    the server resolves PTR itself, only when the ASN org is unknown (otherwise
    it changes nothing), at most 16 resolutions in parallel, answers cached
@@ -354,19 +355,20 @@ organization (and the PTR record when the organization is unknown);
 ## Public instances
 
 These are shared, best-effort instances without an availability guarantee.
-For regular measurements, host your own (variants A–C above).
+For regular measurements, a self-hosted instance is required (variants A–C
+above).
 
 - **https://proxycheck.lmtunnel.com** — enabled in the checker by default.
   Configured with a 1000 requests per minute per client limit (429 +
-  `Retry-After` on exceed; the code default is 6000, see the table below).
+  `Retry-After` on exceed; the table below lists the code default of 6000).
 - **https://proxpulse-judge.onrender.com** — free Render hosting, DB-IP Lite
   databases, image refreshed monthly. The free plan sleeps after 15 minutes
   without traffic (waking up takes about a minute) and is limited to roughly
   750 hours per month, so it may be unavailable near the end of the month
   until the quota resets.
 
-Please keep load reasonable: reverse-DNS is done by the server itself and only
-for unknown ASN orgs; no client-side requests are needed.
+Load is expected to remain reasonable: reverse-DNS is done by the server itself
+and only for unknown ASN orgs; no client-side requests are needed.
 
 ## Databases
 
@@ -383,8 +385,8 @@ works.
 
 ### Database licenses (important)
 
-The files themselves are not in the repository — you download them, and each
-database has its own terms:
+The files themselves are not in the repository — they are downloaded
+separately, and each database has its own terms:
 
 - **DB-IP Lite** — [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
   Attribution is required — an `IP Geolocation by DB-IP` link
@@ -400,18 +402,18 @@ database has its own terms:
 ### Do databases update themselves? No
 
 `scripts/download-dbip.sh` (no keys) or `scripts/download-geolite2.sh`
-(needs `MAXMIND_LICENSE_KEY` from a free account) are manual: download →
-files land in `./geo` → **restart the container** (the geo cache lives in
-memory, new files are not picked up without a restart). For automation —
-monthly cron + restart:
+(needs `MAXMIND_LICENSE_KEY` from a free account) are manual: after download,
+files land in `./geo`, and a container **restart is required** (the geo cache
+lives in memory, new files are not picked up without a restart). For
+automation — monthly cron + restart:
 
 ```cron
 0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
 ```
 
 `docker-compose` mounts `./geo` **read-only**, so the entrypoint cannot
-write there: for compose, download the databases on the host
-(`bash scripts/download-dbip.sh`) or use an image with baked databases
+write there: for compose, the databases are downloaded on the host
+(`bash scripts/download-dbip.sh`), or an image with baked databases is used
 (Render). The entrypoint fallback only works when `GEO_DIR` is writable
 (e.g. `docker run` without a read-only mount); otherwise it logs a warning
 and starts without geo. Custom files (MaxMind or DB-IP) take precedence —
@@ -448,7 +450,7 @@ For running without Docker with logs in a file — example
 | `GEO_DIR` | `/app/geo` | `.mmdb` directory |
 | `TRUST_PROXY` | `0` | `1` — behind a reverse proxy (IP from the end of `X-Forwarded-For`), `0` — directly exposed (IP from socket, headers untrusted); `.env.example` explicitly sets `1` |
 | `TRUST_CF` | `0` | `1` — trust `CF-Connecting-IP`; only behind Cloudflare/Tunnel and only with `TRUST_PROXY=1`. `0` — ignore (safe for Caddy/VPS) |
-| `EDGE_HEADERS` | empty | comma-separated headers your own reverse proxy adds (e.g. `x-real-ip,via`); they are neither analysed nor echoed. Only with `TRUST_PROXY=1`; `x-forwarded-for` is not allowed |
+| `EDGE_HEADERS` | empty | comma-separated headers the deployment's reverse proxy adds (e.g. `x-real-ip,via`); they are neither analysed nor echoed. Only with `TRUST_PROXY=1`; `x-forwarded-for` is not allowed |
 | `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, seconds; clamped to 0–60, invalid values fall back to 1.5 |
 | `RATE_LIMIT_PER_MINUTE` | `6000` | token-bucket burst and sustained requests per client per minute (an IPv4 address or an IPv6 `/64`), `0` — no limit |
 | `METRICS_TOKEN` | empty | when set, `/metrics` requires `Authorization: Bearer <token>` |
@@ -474,8 +476,8 @@ everything behind a reverse proxy would look `anonymous`. With `TRUST_CF=1`,
 - `GET /healthz` — liveness.
 - `GET /readyz` — readiness plus `geo_ready` and the loaded `geo_sources`.
 - `GET /metrics` — Prometheus text counters (requests, 4xx/5xx, rate limits,
-  rDNS, build info). Set `METRICS_TOKEN` (or block the path at the reverse
-  proxy) on a public instance.
+  rDNS, build info). On a public instance, `METRICS_TOKEN` is set (or the path
+  is blocked at the reverse proxy).
 
 Request headers must arrive within 10 seconds, at most 4096 connections are
 open at once, and a request is capped at 20 seconds and 512 concurrent
@@ -486,14 +488,14 @@ limits; metrics are process-local and reset on restart.
 
 | Symptom | Cause and fix |
 |---|---|
-| Every check is `anonymous`, even an elite proxy | Your reverse proxy adds `X-Real-IP`, `Via`, or `Forwarded` (typical for nginx). Remove them or list them in `EDGE_HEADERS`. `GET /headers` directly shows what reaches the judge. |
-| A direct check (no proxy) is `transparent`, and `/ip` shows `127.0.0.1` or `172.x` | The judge is behind a reverse proxy with `TRUST_PROXY=0`: set `TRUST_PROXY=1`. |
-| A proxy known to leak is reported `elite` behind Caddy | Caddy drops the incoming `X-Forwarded-For`: add `trusted_proxies` as in `Caddyfile.example`. |
-| `/ip` shows a Cloudflare address (`172.64.x`, `162.158.x`, …) | Traffic comes through Cloudflare but `TRUST_CF=0`: set `TRUST_CF=1` (with `TRUST_PROXY=1`). |
-| Geo fields are empty with `"error": "no db"`; `/readyz` has `"geo_ready": false` | No `.mmdb` in `./geo`. Run `bash scripts/download-dbip.sh` and restart the container. |
+| Every check is `anonymous`, even an elite proxy | A reverse proxy on the deployment side adds `X-Real-IP`, `Via`, or `Forwarded` (typical for nginx). Such headers are removed from the proxy configuration or listed in `EDGE_HEADERS`. `GET /headers` directly shows what reaches the judge. |
+| A direct check (no proxy) is `transparent`, and `/ip` shows `127.0.0.1` or `172.x` | The judge is behind a reverse proxy with `TRUST_PROXY=0`: `TRUST_PROXY=1` is required. |
+| A proxy known to leak is reported `elite` behind Caddy | Caddy drops the incoming `X-Forwarded-For`: `trusted_proxies` is required, as in `Caddyfile.example`. |
+| `/ip` shows a Cloudflare address (`172.64.x`, `162.158.x`, …) | Traffic comes through Cloudflare but `TRUST_CF=0`: `TRUST_CF=1` and `TRUST_PROXY=1` are required. |
+| Geo fields are empty with `"error": "no db"`; `/readyz` has `"geo_ready": false` | No `.mmdb` in `./geo`. The fix is to run `bash scripts/download-dbip.sh` and restart the container. |
 | The container exits with `invalid configuration` | A misspelled `TRUST_*` value, an invalid `BIND_ADDR`, or `x-forwarded-for` in `EDGE_HEADERS`; the log names the variable. |
-| `/metrics` returns `401` | `METRICS_TOKEN` is set: send `Authorization: Bearer <token>`. |
-| Render: the first request after a pause times out | The free plan sleeps after 15 minutes; repeat the request after about a minute. |
+| `/metrics` returns `401` | `METRICS_TOKEN` is set: the request must include `Authorization: Bearer <token>`. |
+| Render: the first request after a pause times out | The free plan sleeps after 15 minutes; a retry after about a minute resolves it. |
 
 ## Limitations
 
@@ -503,19 +505,19 @@ limits; metrics are process-local and reset on restart.
 - TLS/JA3 is not inspected: TLS terminates at Caddy, Cloudflare, Render, or
   another reverse proxy.
 - Geo accuracy depends on the local database and its update cadence.
-- The public instances are shared and best-effort; use your own instance for
-  reliable measurements.
+- The public instances are shared and best-effort; a self-hosted instance is
+  required for reliable measurements.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for vulnerability reporting.
+Vulnerability reporting is described in [SECURITY.md](SECURITY.md).
 
 The judge is a diagnostic tool, not a security boundary. It does not
 authenticate clients and cannot force a proxy to reveal headers; verdicts are
-best-effort. Run it behind a TLS-terminating reverse proxy, keep the HTTP port
-bound to loopback, set a rate limit, and make `TRUST_PROXY`/`TRUST_CF` match the
-actual topology. A misconfigured trusted header lets clients spoof the reported
-IP/geo and the rate-limit key.
+best-effort. It should run behind a TLS-terminating reverse proxy, with the HTTP
+port bound to loopback, a rate limit configured, and `TRUST_PROXY`/`TRUST_CF`
+matching the actual topology. A misconfigured trusted header lets clients spoof
+the reported IP/geo and the rate-limit key.
 
 ## Development
 
@@ -541,27 +543,29 @@ content). The minimum supported Rust version is 1.88; CI checks it.
 
 ## Contributing
 
-Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for the development workflow. By participating, you agree to the
-[Code of Conduct](CODE_OF_CONDUCT.md). Before sending a change, run
-`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and
-`cargo test`. Report security issues through [SECURITY.md](SECURITY.md), not a
+Bug reports and pull requests are welcome. The development workflow is
+described in [CONTRIBUTING.md](CONTRIBUTING.md). Participation implies
+agreement with the [Code of Conduct](CODE_OF_CONDUCT.md). Before a change is
+sent, the checks `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo test` must pass.
+Security issues should be reported through [SECURITY.md](SECURITY.md), not a
 public issue. Release notes live in [CHANGELOG.md](CHANGELOG.md); maintainers
 can follow [RELEASING.md](RELEASING.md).
 
 ## License
 
-The code is licensed under Apache-2.0; see [LICENSE](LICENSE). Geolocation
-databases are not part of the code license: DB-IP Lite is CC BY 4.0, and
-MaxMind GeoLite2 is governed by the GeoLite2 EULA. Database files are
-downloaded separately or baked into the DB-IP image with attribution.
+The code is licensed under Apache-2.0; the license text is in
+[LICENSE](LICENSE). Geolocation databases are not part of the code license:
+DB-IP Lite is CC BY 4.0, and MaxMind GeoLite2 is governed by the GeoLite2 EULA.
+Database files are downloaded separately or baked into the DB-IP image with
+attribution.
 
 ---
 
 ## Support the project
 
-ProxPulse Judge is free and open source. If it saves you time, you can support
-further development:
+ProxPulse Judge is free and open source. If it saves time, further development
+can be supported here:
 
 <p align="center">
   <a href="https://boosty.to/nechel12/donate">
@@ -579,5 +583,5 @@ further development:
 | **BNB Smart Chain** | `0x423aF840f67355371bf32480744A84069dfab5ff` |
 
 > [!WARNING]
-> Send only the matching asset on the specified network. Transfers to another
-> network cannot be recovered.
+> Only the asset matching the specified network may be sent. Transfers to
+> another network cannot be recovered.
