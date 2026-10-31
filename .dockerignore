@@ -5,5 +5,6 @@ geo/.dbip.*
 geo/.geolite2.*
 .env
 .git/
-/audit.md
-/FINAL_AUDIT_REPORT.md
+.github/
+.serena/
+docs/

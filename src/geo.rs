@@ -175,7 +175,7 @@ impl GeoPool {
                     ip: ip.to_string(),
                     error: Some("invalid ip".to_string()),
                     ..Default::default()
-                }
+                };
             }
         };
         let mut out = GeoInfo {
@@ -191,15 +191,16 @@ impl GeoPool {
                 Err(e) => out.error = Some(format!("city: {}", short_err(&e.to_string()))),
             }
         }
-        if out.country.is_none() && out.country_code.is_none() {
-            if let Some(reader) = &self.country {
-                match lookup_value(reader, addr) {
-                    Ok(Some(v)) if !is_empty_record(&v) => {
-                        apply_city(&v, &mut out);
-                    }
-                    Ok(_) => {}
-                    Err(e) => out.error = Some(format!("country: {}", short_err(&e.to_string()))),
+        if out.country.is_none()
+            && out.country_code.is_none()
+            && let Some(reader) = &self.country
+        {
+            match lookup_value(reader, addr) {
+                Ok(Some(v)) if !is_empty_record(&v) => {
+                    apply_city(&v, &mut out);
                 }
+                Ok(_) => {}
+                Err(e) => out.error = Some(format!("country: {}", short_err(&e.to_string()))),
             }
         }
         if let Some(reader) = &self.asn {
@@ -305,15 +306,15 @@ fn get_u32(v: &Value, paths: &[&[&str]]) -> Option<u32> {
         for key in *path {
             cur = cur.get(*key)?;
         }
-        if let Some(n) = cur.as_u64() {
-            if n <= u32::MAX as u64 {
-                return Some(n as u32);
-            }
+        if let Some(n) = cur.as_u64()
+            && n <= u32::MAX as u64
+        {
+            return Some(n as u32);
         }
-        if let Some(n) = cur.as_i64() {
-            if (0..=u32::MAX as i64).contains(&n) {
-                return Some(n as u32);
-            }
+        if let Some(n) = cur.as_i64()
+            && (0..=u32::MAX as i64).contains(&n)
+        {
+            return Some(n as u32);
         }
         None
     })
@@ -392,10 +393,261 @@ fn apply_asn(v: &Value, out: &mut GeoInfo) {
     }
 }
 
+/// Minimal MaxMind DB writer for tests: an IPv4-only search tree with a
+/// single /24 network and one data record, written as a real `.mmdb` file.
+/// Tests then go through `maxminddb::Reader` (open, metadata, lookup,
+/// decode, verify) instead of feeding hand-built JSON to the field mappers.
+#[cfg(test)]
+pub(crate) mod test_mmdb {
+    use serde_json::{Value, json};
+    use std::path::{Path, PathBuf};
+
+    const METADATA_MARKER: &[u8] = b"\xab\xcd\xefMaxMind.com";
+    const PREFIX_LEN: u32 = 24;
+
+    /// Control byte (plus extended type and size bytes) of one data field.
+    fn control(out: &mut Vec<u8>, kind: u8, size: usize) {
+        // Sizes up to 28 fit in the control byte; the one-byte extension
+        // (29 + next byte) is enough for test records.
+        assert!(size < 285, "value too large for the test writer");
+        let type_bits = if kind > 7 { 0 } else { kind };
+        out.push((type_bits << 5) | size.min(29) as u8);
+        if kind > 7 {
+            out.push(kind - 7);
+        }
+        if size >= 29 {
+            out.push((size - 29) as u8);
+        }
+    }
+
+    /// JSON to MMDB types: string → utf8_string, float → double,
+    /// non-negative integer → uint32, object → map, array → array.
+    /// Records are decoded leniently into JSON; metadata is decoded into
+    /// typed fields and is written by [`write`] with exact integer types.
+    fn encode(out: &mut Vec<u8>, v: &Value) {
+        match v {
+            Value::String(s) => {
+                control(out, 2, s.len());
+                out.extend_from_slice(s.as_bytes());
+            }
+            Value::Number(n) if n.is_f64() => {
+                control(out, 3, 8);
+                out.extend_from_slice(&n.as_f64().unwrap().to_be_bytes());
+            }
+            Value::Number(n) => {
+                let int = n.as_u64().and_then(|n| u32::try_from(n).ok());
+                control(out, 6, 4);
+                out.extend_from_slice(&int.expect("u32 integer").to_be_bytes());
+            }
+            Value::Object(m) => {
+                control(out, 7, m.len());
+                for (k, v) in m {
+                    encode(out, &Value::String(k.clone()));
+                    encode(out, v);
+                }
+            }
+            Value::Array(a) => {
+                control(out, 11, a.len());
+                for v in a {
+                    encode(out, v);
+                }
+            }
+            Value::Bool(_) | Value::Null => unimplemented!("not used by tests"),
+        }
+    }
+
+    /// Write a database whose only network is `network`/24.
+    pub(crate) fn write(path: &Path, database_type: &str, network: [u8; 4], record: &Value) {
+        // One node per prefix bit: the matching branch descends, the other
+        // one is the "no data" record (== node_count). The last matching
+        // branch points at offset 0 of the data section.
+        let node_count = PREFIX_LEN;
+        let empty = node_count;
+        let data = node_count + 16;
+        let bits = u32::from_be_bytes(network);
+        let mut out = Vec::new();
+        for depth in 0..PREFIX_LEN {
+            let next = if depth + 1 == PREFIX_LEN {
+                data
+            } else {
+                depth + 1
+            };
+            let records = if (bits >> (31 - depth)) & 1 == 0 {
+                [next, empty]
+            } else {
+                [empty, next]
+            };
+            for r in records {
+                // 24-bit records
+                out.extend_from_slice(&r.to_be_bytes()[1..]);
+            }
+        }
+        out.extend_from_slice(&[0; 16]);
+        encode(&mut out, record);
+        out.extend_from_slice(METADATA_MARKER);
+        // metadata map: 6 typed integers + 3 JSON-shaped entries
+        control(&mut out, 7, 9);
+        let integers: [(&str, u8, Vec<u8>); 6] = [
+            (
+                "binary_format_major_version",
+                5,
+                2u16.to_be_bytes().to_vec(),
+            ),
+            (
+                "binary_format_minor_version",
+                5,
+                0u16.to_be_bytes().to_vec(),
+            ),
+            ("ip_version", 5, 4u16.to_be_bytes().to_vec()),
+            ("record_size", 5, 24u16.to_be_bytes().to_vec()),
+            ("node_count", 6, node_count.to_be_bytes().to_vec()),
+            ("build_epoch", 9, 1_700_000_000u64.to_be_bytes().to_vec()),
+        ];
+        for (key, kind, bytes) in integers {
+            encode(&mut out, &json!(key));
+            control(&mut out, kind, bytes.len());
+            out.extend_from_slice(&bytes);
+        }
+        for (key, value) in [
+            ("database_type", json!(database_type)),
+            ("description", json!({"en": "proxpulse-judge test"})),
+            ("languages", json!(["en"])),
+        ] {
+            encode(&mut out, &json!(key));
+            encode(&mut out, &value);
+        }
+        std::fs::write(path, out).expect("write test mmdb");
+    }
+
+    /// MaxMind-shaped City and ASN databases covering 203.0.113.0/24.
+    pub(crate) fn write_city_and_asn(dir: &Path) {
+        write(
+            &dir.join("GeoLite2-City.mmdb"),
+            "GeoLite2-City",
+            [203, 0, 113, 0],
+            &json!({
+                "city": {"names": {"en": "Frankfurt"}},
+                "country": {"iso_code": "DE", "names": {"en": "Germany"}},
+                "location": {"latitude": 50.1, "longitude": 8.6},
+            }),
+        );
+        write(
+            &dir.join("GeoLite2-ASN.mmdb"),
+            "GeoLite2-ASN",
+            [203, 0, 113, 0],
+            &json!({
+                "autonomous_system_number": 64500,
+                "autonomous_system_organization": "Example Hosting GmbH",
+            }),
+        );
+    }
+
+    /// Per-test directory under the system temp dir, removed on drop.
+    pub(crate) struct TempDir(PathBuf);
+
+    impl TempDir {
+        pub(crate) fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("proxpulse-judge-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create test dir");
+            Self(dir)
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_mmdb::{self, TempDir};
     use super::*;
     use serde_json::json;
+
+    const MAXMIND_ATTRIBUTION: &str = "This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com";
+
+    #[test]
+    fn real_mmdb_files_are_read_and_verified() {
+        let dir = TempDir::new("geo-real-mmdb");
+        test_mmdb::write_city_and_asn(dir.path());
+        let pool = GeoPool::open(dir.path());
+        assert_eq!(
+            pool.sources().get("city").map(String::as_str),
+            Some("GeoLite2-City.mmdb")
+        );
+        assert_eq!(
+            pool.sources().get("asn").map(String::as_str),
+            Some("GeoLite2-ASN.mmdb")
+        );
+        pool.verify()
+            .expect("test databases are structurally valid");
+        assert_eq!(pool.attributions(), vec![MAXMIND_ATTRIBUTION]);
+
+        let info = pool.lookup("203.0.113.7");
+        assert_eq!(info.error, None);
+        assert_eq!(info.country.as_deref(), Some("Germany"));
+        assert_eq!(info.country_code.as_deref(), Some("DE"));
+        assert_eq!(info.city.as_deref(), Some("Frankfurt"));
+        assert_eq!(info.latitude, Some(50.1));
+        assert_eq!(info.longitude, Some(8.6));
+        assert_eq!(info.asn, Some(64500));
+        assert_eq!(info.aso.as_deref(), Some("Example Hosting GmbH"));
+
+        // IPv4-mapped IPv6 resolves through the IPv4 tree
+        let mapped = pool.lookup("::ffff:203.0.113.7");
+        assert_eq!(mapped.country_code.as_deref(), Some("DE"));
+        // databases are loaded, the address is simply not covered
+        assert_eq!(
+            pool.lookup("198.51.100.1").error.as_deref(),
+            Some("not found")
+        );
+        // IPv6 in IPv4-only databases is a reported error, not a panic
+        assert!(pool.lookup("2001:db8::1").error.is_some());
+    }
+
+    #[test]
+    fn mismatched_database_type_is_ignored() {
+        // Named like a City database but carrying ASN data: must not be
+        // used for city lookups (and is not picked up as ASN either).
+        let dir = TempDir::new("geo-type-mismatch");
+        test_mmdb::write(
+            &dir.path().join("GeoLite2-City.mmdb"),
+            "GeoLite2-ASN",
+            [203, 0, 113, 0],
+            &json!({"autonomous_system_number": 64500}),
+        );
+        let pool = GeoPool::open(dir.path());
+        assert!(pool.sources().is_empty());
+        assert_eq!(pool.lookup("203.0.113.7").error.as_deref(), Some("no db"));
+    }
+
+    #[test]
+    fn dbip_files_get_dbip_attribution() {
+        let dir = TempDir::new("geo-dbip");
+        test_mmdb::write(
+            &dir.path().join("dbip-city-lite.mmdb"),
+            "DBIP-City-Lite",
+            [203, 0, 113, 0],
+            &json!({"country": {"iso_code": "DE"}}),
+        );
+        let pool = GeoPool::open(dir.path());
+        assert_eq!(
+            pool.attributions(),
+            vec!["IP Geolocation by DB-IP (https://db-ip.com)"]
+        );
+        assert_eq!(
+            pool.lookup("203.0.113.7").country_code.as_deref(),
+            Some("DE")
+        );
+    }
 
     #[test]
     fn maxmind_shaped_record() {

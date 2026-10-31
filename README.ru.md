@@ -3,32 +3,48 @@
 [English](README.md) | **Русский**
 
 [![CI](https://github.com/nechel12/proxpulse-judge/actions/workflows/docker.yml/badge.svg?branch=main)](https://github.com/nechel12/proxpulse-judge/actions/workflows/docker.yml)
+[![Release](https://img.shields.io/github/v/release/nechel12/proxpulse-judge)](https://github.com/nechel12/proxpulse-judge/releases)
 [![License](https://img.shields.io/github/license/nechel12/proxpulse-judge)](LICENSE)
-[![Last commit](https://img.shields.io/github/last-commit/nechel12/proxpulse-judge)](https://github.com/nechel12/proxpulse-judge/commits/main)
-[![Rust](https://img.shields.io/badge/backend-Rust-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![GHCR](https://img.shields.io/badge/ghcr.io-proxpulse--judge-2496ED?logo=docker&logoColor=white)](https://github.com/nechel12/proxpulse-judge/pkgs/container/proxpulse-judge)
-[![Security policy](https://img.shields.io/badge/security-policy-green)](SECURITY.md)
+[![GHCR](https://img.shields.io/badge/ghcr.io-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://github.com/nechel12/proxpulse-judge/pkgs/container/proxpulse-judge)
+[![MSRV](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust&logoColor=white)](Cargo.toml)
+[![Dependencies](https://deps.rs/repo/github/nechel12/proxpulse-judge/status.svg)](https://deps.rs/repo/github/nechel12/proxpulse-judge)
 [![CodeQL](https://github.com/nechel12/proxpulse-judge/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/nechel12/proxpulse-judge/security/code-scanning)
+[![Security policy](https://img.shields.io/badge/security-policy-green)](SECURITY.md)
+[![Last commit](https://img.shields.io/github/last-commit/nechel12/proxpulse-judge)](https://github.com/nechel12/proxpulse-judge/commits/main)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
 Self-hosted backend для проверки прокси. Один запрос `GET /judge` возвращает
-IP выхода прокси, гео из **локальных** `.mmdb`, заголовки запроса для
-анализа анонимности и фиксированный контент для проверки целостности.
+IP выхода прокси, уровень анонимности, гео и ASN из **локальных** `.mmdb`,
+тип IP и хэш фиксированного контента для проверки целостности.
 
 Стек: **Rust + axum + tokio**, базы в ОЗУ, кэш лукапов. Без сторонних
-HTTP API в обработке запросов; rate-limit настраивается
-(`RATE_LIMIT_PER_MINUTE`, по умолчанию 6000/мин на IP). Сервис — один
-бинарь на `debian:bookworm-slim`; в образ также входят `bash`, `curl`
-и `gzip` для опционального fallback-скачивания баз.
+HTTP API в обработке запросов; rate-limit на клиента настраивается
+(`RATE_LIMIT_PER_MINUTE`, по умолчанию 6000/мин). Сервис — один бинарь на
+`debian:trixie-slim`; в образ по умолчанию также входят `curl` и `gzip` для
+опционального fallback-скачивания баз, в образ для Render — нет.
 
 > Статус: pre-1.0. Документированные HTTP-эндпоинты считаются стабильными,
 > но поведение может меняться в минорных релизах.
+
+## Содержание
+
+- [Быстрый старт](#быстрый-старт) · [Готовый образ и бинарники](#готовый-образ-и-бинарники)
+- Развёртывание: [А — Caddy](#вариант-а--caddy-реверс-прокси) (или [nginx](#nginx-вместо-caddy)) ·
+  [Б — Cloudflare Tunnel](#вариант-б--cloudflare-tunnel-без-caddy-и-открытых-портов) ·
+  [В — Render](#вариант-в--render-бесплатный-хостинг-без-vps)
+- [Эндпоинты](#эндпоинты) · [Как выносится вердикт](#как-выносится-вердикт) ·
+  [Как пользоваться из чекера](#как-пользоваться-из-чекера)
+- [Публичные инстансы](#публичные-инстансы) · [Базы](#базы)
+- [Конфигурация](#конфигурация) · [Мониторинг](#мониторинг) ·
+  [Частые проблемы](#частые-проблемы)
+- [Ограничения](#ограничения) · [Безопасность](#безопасность) ·
+  [Разработка](#разработка)
 
 ## Быстрый старт
 
 Нужны [Docker](https://docs.docker.com/get-docker/) с Compose, а также
 `bash`, `curl` и `gzip` для скрипта скачивания баз. Для разработки без
-Docker — [Rust](https://rustup.rs/) stable.
+Docker — [Rust](https://rustup.rs/) 1.88 или новее.
 
 ```sh
 git clone https://github.com/nechel12/proxpulse-judge.git
@@ -40,19 +56,39 @@ docker compose up -d --build
 curl http://127.0.0.1:8000/judge
 ```
 
-### Готовый образ
+### Готовый образ и бинарники
 
-Ежемесячный CI публикует образы с DB-IP Lite в GHCR:
+CI публикует в GHCR мультиархитектурный образ (`linux/amd64`, `linux/arm64`)
+со вшитыми базами DB-IP Lite:
 
 ```sh
 docker pull ghcr.io/nechel12/proxpulse-judge:latest
 ```
 
-Плановые сборки обновляют `:latest` и `:YYYYMM`; ручной релиз дополнительно
-публикует `:vX.Y.Z`. Образы рассчитаны на stateless-хостинг
-(Render и аналоги) и не содержат данных MaxMind. Для VPS со своими
-MaxMind/DB-IP файлами собери `Dockerfile` и смонтируй `./geo`, как описано
-ниже.
+Ежемесячные плановые сборки обновляют базы и теги `:latest` и `:YYYYMM`;
+подписанный релизный тег `vX.Y.Z` дополнительно публикует `:vX.Y.Z`, который
+никогда не перезаписывается. Каждый образ перед публикацией проходит
+smoke-тест со вшитыми базами и скан Trivy и несёт подписанную attestation о
+происхождении сборки:
+
+```sh
+gh attestation verify oci://ghcr.io/nechel12/proxpulse-judge:latest --owner nechel12
+```
+
+Образы рассчитаны на stateless-хостинг (Render и аналоги) и не содержат
+данных MaxMind. Для VPS со своими MaxMind/DB-IP файлами собери цель
+`Dockerfile` по умолчанию и смонтируй `./geo`, как описано ниже.
+
+К каждому [релизу на GitHub](https://github.com/nechel12/proxpulse-judge/releases)
+прикладываются статические Linux-бинарники (`x86_64`, `aarch64`) с
+`SHA256SUMS` и attestation.
+
+> [!IMPORTANT]
+> По умолчанию в образе `TRUST_PROXY=0` и `TRUST_CF=0`: IP клиента берётся из
+> сокета. Задай оба под свою топологию (`render.yaml` уже ставит `1` для
+> Render). Никогда не включай `TRUST_CF=1`, если не каждый запрос приходит в
+> контейнер через Cloudflare: иначе любой клиент подделает свой IP, гео и ключ
+> rate-limit заголовком `CF-Connecting-IP`.
 
 ## Вариант А — Caddy (реверс-прокси)
 
@@ -89,7 +125,25 @@ curl https://check.yourdomain.com/healthz
 `trusted_proxies` диапазонами Cloudflare вместо `0.0.0.0/0`, ограничь
 порты 80/443 только IP-диапазонами Cloudflare (или включи Authenticated
 Origin Pulls, так как `trusted_proxies` контролирует только `X-Forwarded-*`,
-но не `CF-Connecting-IP`), оставь `TRUST_CF=1` и убедись, что `TRUST_PROXY=1`.
+но не `CF-Connecting-IP`), включи `TRUST_CF=1` и убедись, что `TRUST_PROXY=1`.
+
+### nginx вместо Caddy
+
+[`nginx.conf.example`](nginx.conf.example) — аналогичный server-блок. Главное
+в нём:
+
+```nginx
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header CF-Connecting-IP "";
+proxy_set_header True-Client-IP "";
+```
+
+nginx дописывает адрес подключившегося к `X-Forwarded-For` прокси, поэтому
+`TRUST_PROXY=1` работает так же, как с Caddy. **Не** добавляй там
+`X-Real-IP`, `Via` или `Forwarded` (во многих шаблонах nginx они есть):
+judge считает их признаками прокси, и каждая проверка выйдет `anonymous`.
+Если без них никак, перечисли их в `EDGE_HEADERS` (например,
+`EDGE_HEADERS=x-real-ip`), чтобы они не приписывались проверяемому прокси.
 
 ## Вариант Б — Cloudflare Tunnel (без Caddy и открытых портов)
 
@@ -166,10 +220,12 @@ Cloudflare Tunnel в этом варианте не требуется: TLS и �
   по таймауту — достаточно повторить её. Один сервис примерно соответствует
   лимиту бесплатных 750 ч/мес.
 - Файловая система эфемерна, но это не страшно: базы вшиты в образ.
-- `TRUST_CF=1` обязателен (трафик Render проходит через Cloudflare,
-  реальный IP извлекается из `CF-Connecting-IP`) — значение уже задано
-  в `render.yaml`. Переменная `PORT` задаётся самим Render и не должна
-  переопределяться.
+- `TRUST_PROXY=1` и `TRUST_CF=1` обязательны (трафик Render проходит
+  через Cloudflare, реальный IP извлекается из `CF-Connecting-IP`).
+  `render.yaml` задаёт оба; в самом образе по умолчанию `0`, поэтому
+  сервису, созданному вручную, нужно добавить обе переменные в дашборде
+  Render (Environment). Переменная `PORT` задаётся самим Render и не
+  должна переопределяться.
 - В образе только DB-IP Lite: GeoLite2 EULA ограничивает публичное
   распространение, поэтому данные MaxMind не вшиваются в публикуемый
   образ. Хочешь MaxMind — это вариант с VPS + volume выше.
@@ -209,19 +265,76 @@ Cloudflare Tunnel в этом варианте не требуется: TLS и �
 | GET | `/judge?direct_ip=...` | всё сразу + `anonymity`, `content_sha256` |
 | GET | `/healthz` | `{"ok": true}` — liveness |
 | GET | `/readyz` | `{"ok", "geo_ready", "geo_sources"}` — readiness |
-| GET | `/metrics` | счётчики в формате Prometheus |
+| GET | `/metrics` | счётчики в формате Prometheus (можно закрыть `METRICS_TOKEN`) |
 
-Пример ответа `/judge` (сокращённо; заголовки и детали signals опущены):
+`/headers` и `/judge` возвращают заголовки такими, какими их отправил
+проверяемый прокси: записи `X-Forwarded-For`, которые дописал твой
+реверс-прокси, и `EDGE_HEADERS` убираются, остаётся только пришедшее со
+стороны прокси.
+
+Пример ответа `/judge` через анонимный прокси, с базами DB-IP:
 
 ```json
 {
   "ip": "203.0.113.7",
-  "anonymity": "elite",
-  "geo": {"country": "Germany", "country_code": "DE", "city": "Frankfurt", "asn": 9009},
+  "anonymity": "anonymous",
+  "xff_chain": [],
+  "headers": {
+    "host": "check.yourdomain.com",
+    "user-agent": "curl/8.10.1",
+    "via": "1.1 squid",
+    "x-forwarded-proto": "https"
+  },
+  "geo": {
+    "ip": "203.0.113.7",
+    "country": "Germany",
+    "country_code": "DE",
+    "city": "Frankfurt am Main",
+    "latitude": 50.1155,
+    "longitude": 8.6842,
+    "asn": 24940,
+    "aso": "Hetzner Online GmbH"
+  },
+  "geo_source": {"asn": "dbip-asn-lite.mmdb", "city": "dbip-city-lite.mmdb"},
+  "attribution": ["IP Geolocation by DB-IP (https://db-ip.com)"],
   "ip_type": "datacenter",
-  "content_sha256": "1a05…"
+  "type_signals": {
+    "org": "Hetzner Online GmbH",
+    "rdns": null,
+    "hosting_kw": [],
+    "hosting_vendor": ["hetzner"],
+    "mobile_kw": [],
+    "residential_kw": [],
+    "business_kw": []
+  },
+  "content_version": 1,
+  "content_sha256": "1a0525d8797ca470e7b4a7c47622a89b011760f9db2d587ce7a5e06e99c1bcb9"
 }
 ```
+
+## Как выносится вердикт
+
+| `anonymity` | Значение |
+|---|---|
+| `transparent` | Твой `direct_ip` найден в цепочке форвардинга или в значении любого другого заголовка (в любой записи IPv4/IPv6): прокси сливает реальный IP. |
+| `anonymous` | Утечки нет, но прокси себя выдаёт: записи `X-Forwarded-For` (даже `unknown`) или заголовки `Via`, `Forwarded`, `X-Real-IP`, `Proxy-*`, `X-Proxy*`. |
+| `elite` | Ни того, ни другого: запрос выглядит как прямой. |
+
+```mermaid
+flowchart TD
+    A[Запрос через проверяемый прокси] --> B["Убираем добавленное нашим edge:<br/>хопы XFF (TRUST_PROXY), CF-заголовки (TRUST_CF), EDGE_HEADERS"]
+    B --> C{"direct_ip в XFF<br/>или в значении заголовка?"}
+    C -- да --> T[transparent]
+    C -- нет --> D{"Остались записи XFF или есть Via / Forwarded /<br/>X-Real-IP / Proxy-*?"}
+    D -- да --> N[anonymous]
+    D -- нет --> E[elite]
+```
+
+Без `direct_ip` утечку не отличить от обычного форвардинга, поэтому результат
+будет не хуже `anonymous`. `ip_type` — `mobile`, `datacenter`, `business`,
+`residential` или `unknown`; определяется по организации ASN (и по PTR, если
+организация неизвестна), а `type_signals` показывает, какие ключевые слова
+сработали.
 
 ## Как пользоваться из чекера
 
@@ -244,7 +357,7 @@ Cloudflare Tunnel в этом варианте не требуется: TLS и �
 доступности. Для регулярных измерений подними свой (варианты А–В выше).
 
 - **https://proxycheck.lmtunnel.com** — включён в чекер по умолчанию.
-  Настроен лимит 1000 запросов в минуту с одного IP (при превышении —
+  Настроен лимит 1000 запросов в минуту с одного клиента (при превышении —
   429 + `Retry-After`; дефолт в конфиге — 6000, см. таблицу ниже).
 - **https://proxpulse-judge.onrender.com** — бесплатный Render, базы
   DB-IP Lite, образ обновляется каждый месяц. На free-плане сервис
@@ -309,7 +422,9 @@ mount); иначе в лог пишется warning и сервис старту
 Сервис пишет логи в stdout. Драйвер Docker `json-file` по умолчанию
 хранит их без ограничения размера, поэтому в `docker-compose.yml`
 заданы лимиты (`max-size: 10m`, `max-file: 3` — до ~30 МБ на контейнер).
-При запуске через compose дополнительная настройка не требуется.
+При запуске через compose дополнительная настройка не требуется. Кроме того,
+сервис в compose работает с read-only корневой ФС, без capabilities, с
+`no-new-privileges` и лимитом памяти 512 МБ.
 
 Для запуска без Docker с логами в файл — пример
 `/etc/logrotate.d/proxpulse-judge`:
@@ -330,33 +445,55 @@ mount); иначе в лог пишется warning и сервис старту
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
 | `PORT` | `8000` | порт HTTP |
+| `BIND_ADDR` | `0.0.0.0` | адрес прослушивания; `::` принимает и IPv6, если хост поддерживает dual-stack |
 | `GEO_DIR` | `/app/geo` | каталог `.mmdb` |
 | `TRUST_PROXY` | `0` | `1` — за реверс-прокси (IP из конца `X-Forwarded-For`), `0` — напрямую (IP из сокета, заголовки не доверяем); в `.env.example` явно задано `1` |
 | `TRUST_CF` | `0` | `1` — верить `CF-Connecting-IP`; только за Cloudflare/Tunnel и только вместе с `TRUST_PROXY=1`. `0` — игнорировать (безопасно для Caddy/VPS) |
+| `EDGE_HEADERS` | пусто | заголовки через запятую, которые добавляет твой реверс-прокси (например, `x-real-ip,via`); они не анализируются и не отдаются в эхо. Только при `TRUST_PROXY=1`; `x-forwarded-for` указывать нельзя |
 | `RDNS_TIMEOUT` | `1.5` | таймаут серверного rDNS, сек; ограничивается 0–60, некорректное значение — 1.5 |
-| `RATE_LIMIT_PER_MINUTE` | `6000` | token bucket: burst и средний темп запросов с IP в минуту, `0` — без лимита |
+| `RATE_LIMIT_PER_MINUTE` | `6000` | token bucket: burst и средний темп запросов с клиента в минуту (IPv4-адрес или IPv6-сеть `/64`), `0` — без лимита |
+| `METRICS_TOKEN` | пусто | если задан, `/metrics` требует `Authorization: Bearer <token>` |
 | `RUST_LOG` | `info` | уровень логов |
+
+`TRUST_PROXY` и `TRUST_CF` принимают `1`/`0`, `true`/`false`, `yes`/`no`,
+`on`/`off`; любое другое значение, некорректный `BIND_ADDR` или ошибка в
+`EDGE_HEADERS` останавливают сервис при старте, а не меняют молча то, каким
+заголовкам он доверяет.
 
 При `TRUST_PROXY=1` IP клиента берётся из **последней** записи
 `X-Forwarded-For`. Caddy 2.5+ по умолчанию заменяет входящий XFF адресом
 непосредственного клиента; `Caddyfile.example` включает `trusted_proxies`,
 чтобы сохранить цепочку проверяемого прокси — тогда Caddy дописывает адрес
 клиента в конец. nginx (`proxy_add_x_forwarded_for`) и Cloudflare также
-дописывают в конец. Собственные заголовки Caddy
-(`X-Forwarded-Proto`/`Host`) исключены из детекта анонимности, иначе за
-реверс-прокси все были бы `anonymous`. При `TRUST_CF=1` приоритет у
-`CF-Connecting-IP`.
+дописывают в конец. Заголовки реверс-прокси вроде `X-Forwarded-Proto`/`Host`
+исключены из детекта анонимности, иначе за реверс-прокси все были бы
+`anonymous`. При `TRUST_CF=1` приоритет у `CF-Connecting-IP`.
 
 ## Мониторинг
 
 - `GET /healthz` — liveness.
 - `GET /readyz` — readiness плюс `geo_ready` и загруженные `geo_sources`.
 - `GET /metrics` — счётчики в формате Prometheus (запросы, 4xx/5xx,
-  rate-limit, rDNS, build info).
+  rate-limit, rDNS, build info). На публичном инстансе задай
+  `METRICS_TOKEN` (или закрой путь на реверс-прокси).
 
-Запрос ограничен 20 секундами и 512 одновременными запросами. Эндпоинты
-мониторинга исключены из rate/concurrency-лимитов; метрики живут в памяти
-процесса и сбрасываются при рестарте.
+Заголовки запроса должны прийти за 10 секунд, одновременно открыто не больше
+4096 соединений, запрос ограничен 20 секундами и 512 одновременными
+запросами. Эндпоинты мониторинга исключены из rate/concurrency-лимитов;
+метрики живут в памяти процесса и сбрасываются при рестарте.
+
+## Частые проблемы
+
+| Симптом | Причина и решение |
+|---|---|
+| Все проверки `anonymous`, даже elite-прокси | Реверс-прокси добавляет `X-Real-IP`, `Via` или `Forwarded` (типично для nginx). Убери их или перечисли в `EDGE_HEADERS`. Прямой `GET /headers` покажет, что доходит до judge. |
+| Прямая проверка (без прокси) — `transparent`, а `/ip` показывает `127.0.0.1` или `172.x` | Judge стоит за реверс-прокси с `TRUST_PROXY=0`: включи `TRUST_PROXY=1`. |
+| Заведомо «текущий» прокси за Caddy получает `elite` | Caddy отбрасывает входящий `X-Forwarded-For`: добавь `trusted_proxies`, как в `Caddyfile.example`. |
+| `/ip` показывает адрес Cloudflare (`172.64.x`, `162.158.x`, …) | Трафик идёт через Cloudflare, а `TRUST_CF=0`: включи `TRUST_CF=1` (вместе с `TRUST_PROXY=1`). |
+| Гео пустое с `"error": "no db"`; в `/readyz` `"geo_ready": false` | В `./geo` нет `.mmdb`. Запусти `bash scripts/download-dbip.sh` и перезапусти контейнер. |
+| Контейнер завершается с `invalid configuration` | Опечатка в значении `TRUST_*`, некорректный `BIND_ADDR` или `x-forwarded-for` в `EDGE_HEADERS`; переменная указана в логе. |
+| `/metrics` отвечает `401` | Задан `METRICS_TOKEN`: передай `Authorization: Bearer <token>`. |
+| Render: первый запрос после паузы падает по таймауту | Free-план засыпает через 15 минут; повтори запрос примерно через минуту. |
 
 ## Ограничения
 
@@ -383,15 +520,19 @@ HTTP-порт на loopback, задай rate-limit и настрой
 ## Разработка
 
 ```sh
-cargo test        # 60 тестов: логика, geo-парсинг, API, лимиты
+cargo test        # логика, гео (реальные .mmdb-фикстуры), API, лимиты сервера
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
 
 scripts/smoke.sh http://127.0.0.1:8000
 scripts/load.sh http://127.0.0.1:8000 300 32
 ```
 
-Структура: `src/main.rs` (HTTP + кэши), `src/geo.rs` (пул `.mmdb`),
-`src/logic.rs` (анонимность, тип IP, фикс-контент).
+Структура: `src/main.rs` (запуск, healthcheck), `src/config.rs` (переменные
+окружения), `src/server.rs` (соединения, таймауты, graceful shutdown),
+`src/app.rs` (маршруты, middleware, обработчики), `src/ratelimit.rs`,
+`src/metrics.rs`, `src/geo.rs` (пул `.mmdb`), `src/logic.rs` (анонимность,
+тип IP, фикс-контент). Минимальная поддерживаемая версия Rust — 1.88; CI её
+проверяет.
 
 ## Связанные проекты
 

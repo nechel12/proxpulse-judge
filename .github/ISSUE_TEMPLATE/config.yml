@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/nechel12/proxpulse-judge/security/advisories/new
     about: Report security issues privately, not in a public issue.
   - name: Setup and configuration
-    url: https://github.com/nechel12/proxpulse-judge#readme
-    about: Read the README before opening an issue.
+    url: https://github.com/nechel12/proxpulse-judge#troubleshooting
+    about: Wrong verdicts, empty geo, startup errors — check the troubleshooting table first.

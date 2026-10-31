@@ -7,7 +7,7 @@
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo test`
-- [ ] `bash -n scripts/download-dbip.sh scripts/download-geolite2.sh scripts/docker-entrypoint.sh scripts/smoke.sh scripts/load.sh`
+- [ ] `bash -n scripts/*.sh`
 - [ ] Docker build (if container files changed)
 
 ## Checklist

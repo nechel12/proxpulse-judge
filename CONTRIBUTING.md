@@ -13,19 +13,19 @@ explain the behavior and tradeoffs in the PR description.
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-bash -n scripts/download-dbip.sh scripts/download-geolite2.sh \
-  scripts/docker-entrypoint.sh scripts/smoke.sh scripts/load.sh
+bash -n scripts/*.sh
 ```
 
 For Docker changes, build the affected image:
 
 ```sh
-docker build -f Dockerfile .
-docker build -f Dockerfile.render .
+docker build .                   # runtime target (VPS, docker compose)
+docker build --target render .   # Render image with baked DB-IP Lite
 ```
 
-`Dockerfile.render` downloads the DB-IP Lite databases and is slower; the main
-`Dockerfile` is enough for most code changes.
+The `render` target downloads the DB-IP Lite databases and is slower; the
+default target is enough for most code changes. Base images are pinned by
+digest; let Dependabot bump them.
 
 Run the service locally:
 

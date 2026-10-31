@@ -1,7 +1,9 @@
 services:
   judge:
-    build: .
-    image: proxpulse-judge:0.5.6
+    build:
+      context: .
+      target: runtime
+    image: proxpulse-judge:local
     container_name: proxpulse-judge
     restart: unless-stopped
     ports:
@@ -10,6 +12,16 @@ services:
       - ./geo:/app/geo:ro
     env_file:
       - .env
+    # Сервис ничего не пишет на диск и не нуждается в привилегиях.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Базы держатся в RAM (DB-IP City + ASN ≈ 200 МБ) плюс кэши.
+    mem_limit: 512m
     logging:
       driver: json-file
       options:
