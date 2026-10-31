@@ -1,4 +1,9 @@
 /target/
 *.mmdb
 *.mmdb.gz
+# temp dirs of interrupted database downloads
+geo/.dbip.*
+geo/.geolite2.*
 .env
+# local editor/agent tooling
+.serena/

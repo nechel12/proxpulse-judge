@@ -3,6 +3,7 @@
 # SMOKE_EXPECT_GEO=1 additionally requires loaded geo databases and a real
 # lookup. The probe IP goes in X-Forwarded-For, so a local container needs
 # TRUST_PROXY=1; behind a reverse proxy the caller's own public IP is used.
+# SMOKE_METRICS_TOKEN is sent to /metrics when the instance sets METRICS_TOKEN.
 set -euo pipefail
 
 BASE="${1:-http://127.0.0.1:8000}"
@@ -34,7 +35,12 @@ get /judge
 grep -q '"anonymity"' "$TMP/body" || fail "/judge: missing anonymity"
 grep -q '"content_sha256"' "$TMP/body" || fail "/judge: missing content_sha256"
 
-get /metrics
+AUTH=()
+if [ -n "${SMOKE_METRICS_TOKEN:-}" ]; then
+  AUTH=(-H "Authorization: Bearer $SMOKE_METRICS_TOKEN")
+fi
+# ${AUTH[@]+...}: an empty array is "unbound" under set -u in bash < 4.4 (macOS)
+curl -fsS ${AUTH[@]+"${AUTH[@]}"} -o "$TMP/body" "$BASE/metrics" || fail "/metrics: request failed"
 grep -q 'proxpulse_requests_total' "$TMP/body" || fail "/metrics: missing counter"
 grep -q 'proxpulse_build_info' "$TMP/body" || fail "/metrics: missing build info"
 
@@ -46,6 +52,7 @@ code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/content")"
 
 curl -fsS -D "$TMP/headers" -o /dev/null "$BASE/ip"
 grep -qi '^cache-control: no-store' "$TMP/headers" || fail "/ip: no-store missing"
+grep -qi '^x-content-type-options: nosniff' "$TMP/headers" || fail "/ip: nosniff missing"
 
 curl -fsS -D "$TMP/headers" -o /dev/null "$BASE/content"
 if grep -qi '^cache-control:' "$TMP/headers"; then
