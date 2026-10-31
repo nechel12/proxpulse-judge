@@ -1,7 +1,12 @@
 # Monthly rebuild образа с вшитыми DB-IP Lite (базы выходят раз в месяц).
-# Schedule пушит :latest + :YYYYMM; ручной релиз добавляет :vX.Y.Z.
-# Образ собирается БЕЗ кэша слоёв специально: иначе закэшируется и стадия
+# Schedule и ручной запуск (только с main) пушат :latest + :YYYYMM;
+# подписанный релизный тег vX.Y.Z дополнительно публикует неизменяемый
+# :vX.Y.Z (см. RELEASING.md).
+# Публикуется ровно тот образ, который прошёл smoke-тест со вшитыми базами и
+# Trivy; в реестр уходят provenance, SBOM и подписанная GitHub attestation.
+# Тестовая сборка идёт БЕЗ кэша слоёв специально: иначе закэшируется и стадия
 # скачивания баз, и monthly-обновление молча перестанет обновляться.
+# Actions закреплены по SHA; Dependabot обновляет их вместе с комментарием.
 # Первый запуск — руками (Actions → docker → Run workflow). Пакет
 # обычно наследует public от публичного репо; если Render ругнётся
 # Image Pull Failed — проверь видимость: профиль → Packages →
@@ -11,6 +16,7 @@ name: docker
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   schedule:
     - cron: "0 4 3 * *" # 3-е число каждого месяца, 04:00 UTC (как cron в README)
@@ -21,7 +27,9 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
+  # Отменяем только устаревшие прогоны PR и main; scheduled, ручные и
+  # релизные (тег) сборки всегда доходят до конца.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch') }}
 
 jobs:
   test:
@@ -30,10 +38,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: clippy,rustfmt
 
       - name: Format
@@ -46,25 +55,25 @@ jobs:
         run: cargo test --locked
 
       - name: RustSec audit
-        uses: rustsec/audit-check@v2.0.0
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Actionlint
-        uses: reviewdog/action-actionlint@v1.81.0
+        uses: reviewdog/action-actionlint@5d802a8ebdcb24d712925118c3a4596f571d8fcd # v1.81.0
         with:
           reporter: github-check
           fail_level: error
 
       - name: Hadolint Dockerfile
-        uses: hadolint/hadolint-action@v3.5.0
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: Dockerfile
           failure-threshold: warning
           ignore: DL3008
 
       - name: Hadolint Dockerfile.render
-        uses: hadolint/hadolint-action@v3.5.0
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
           dockerfile: Dockerfile.render
           failure-threshold: warning
@@ -77,13 +86,13 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build image
         run: docker build -t proxpulse-judge:smoke -f Dockerfile .
 
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: proxpulse-judge:smoke
           severity: HIGH,CRITICAL
@@ -91,64 +100,123 @@ jobs:
           exit-code: 1
 
       - name: Smoke and load checks
-        run: |
-          set -euo pipefail
-          docker run -d --rm --name judge-smoke -p 127.0.0.1:8000:8000 \
-            -v "$PWD/geo:/app/geo:ro" proxpulse-judge:smoke
-          trap 'docker logs judge-smoke || true; docker stop judge-smoke || true' EXIT
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8000/healthz >/dev/null; then break; fi
-            sleep 1
-          done
-          bash scripts/smoke.sh http://127.0.0.1:8000
-          bash scripts/load.sh http://127.0.0.1:8000 300 32
+        run: bash scripts/container-smoke.sh proxpulse-judge:smoke -v "$PWD/geo:/app/geo:ro"
 
   build:
     needs: [test, smoke]
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     env:
       RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tag verification needs origin/main
 
-      - uses: docker/setup-buildx-action@v4
+      # Релиз — только подписанный ключом docs/proxpulse-release.pub тег на
+      # main, совпадающий с версией в Cargo.toml.
+      - name: Verify release tag
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          version="v$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $tag does not match Cargo.toml version $version"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$tag does not point to a commit on main"
+            exit 1
+          fi
+          # checkout может оставить на теге лёгкую ссылку: берём аннотированный объект
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          printf 'proxpulse-release namespaces="git" %s\n' \
+            "$(cut -d' ' -f1,2 docs/proxpulse-release.pub)" > "$RUNNER_TEMP/allowed_signers"
+          git -c gpg.ssh.allowedSignersFile="$RUNNER_TEMP/allowed_signers" tag -v "$tag"
 
-      - uses: docker/login-action@v4
+      - name: Image name and tags
+        id: meta
+        run: |
+          set -euo pipefail
+          name="$(echo "ghcr.io/${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')/proxpulse-judge"
+          {
+            echo "name=$name"
+            echo "tags<<EOF"
+            echo "$name:latest"
+            echo "$name:$(date +%Y%m)"
+            if [ "$GITHUB_REF_TYPE" = tag ]; then echo "$name:$GITHUB_REF_NAME"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image (no cache — DBs must be fresh)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.render
+          load: true
+          no-cache: true
+          tags: proxpulse-judge:render
+
+      - name: Smoke test with baked databases
+        run: SMOKE_EXPECT_GEO=1 bash scripts/container-smoke.sh proxpulse-judge:render -e TRUST_PROXY=1
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: proxpulse-judge:render
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Image name (lowercase)
-        id: img
-        run: echo "name=$(echo 'ghcr.io/${{ github.repository_owner }}/proxpulse-judge' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      - name: Month tag
-        id: tag
-        run: echo "month=$(date +%Y%m)" >> "$GITHUB_OUTPUT"
-
-      - name: Version tag
-        id: version
+      - name: Refuse to overwrite a published version
+        if: github.ref_type == 'tag'
+        env:
+          IMAGE: ${{ steps.meta.outputs.name }}
         run: |
-          version="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
-          echo "version=v$version" >> "$GITHUB_OUTPUT"
+          if docker buildx imagetools inspect "$IMAGE:$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "::error::$IMAGE:$GITHUB_REF_NAME is already published; version tags are immutable"
+            exit 1
+          fi
 
-      - name: Build and push (no cache — DBs must be fresh)
-        uses: docker/build-push-action@v7
+      # Вторая сборка берёт все слои из кэша первой (тот же builder), поэтому
+      # в реестр уходят ровно протестированные слои; свежая загрузка баз не
+      # повторяется. См. docs.docker.com/build/ci/github-actions/test-before-push/
+      - name: Push the tested image
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: Dockerfile.render
           push: true
-          no-cache: true
-          tags: |
-            ${{ steps.img.outputs.name }}:latest
-            ${{ steps.img.outputs.name }}:${{ steps.tag.outputs.month }}
-            ${{ github.event_name == 'workflow_dispatch' && format('{0}:{1}', steps.img.outputs.name, steps.version.outputs.version) || '' }}
+          provenance: mode=max
+          sbom: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.meta.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
       # Авто-редеплой своего Render-сервиса после свежей сборки.
       # Секретом владеет только владелец форка: в этом репо секрета нет

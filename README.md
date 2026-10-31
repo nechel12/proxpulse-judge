@@ -48,10 +48,25 @@ Monthly CI publishes DB-IP Lite images to GHCR:
 docker pull ghcr.io/nechel12/proxpulse-judge:latest
 ```
 
-Scheduled builds update `:latest` and `:YYYYMM`; manual releases additionally
-publish `:vX.Y.Z`. These images are intended for stateless hosts such as Render
+Scheduled builds update `:latest` and `:YYYYMM`; signed `vX.Y.Z` release tags
+additionally publish `:vX.Y.Z`, which is never overwritten. Every image passes
+a smoke test with the baked databases and a Trivy scan before it is pushed and
+carries a signed build provenance attestation:
+
+```sh
+gh attestation verify oci://ghcr.io/nechel12/proxpulse-judge:latest --owner nechel12
+```
+
+These images are intended for stateless hosts such as Render
 and do not contain MaxMind data. For a VPS with your own
 MaxMind/DB-IP files, build `Dockerfile` and mount `./geo` as described below.
+
+> [!IMPORTANT]
+> The image defaults to `TRUST_PROXY=0` and `TRUST_CF=0`: the client IP is the
+> socket address. Set both for your topology (`render.yaml` already sets them
+> to `1` for Render). Never set `TRUST_CF=1` unless every request reaches the
+> container through Cloudflare: otherwise any client can spoof its IP, geo and
+> rate-limit key with a `CF-Connecting-IP` header.
 
 ## Variant A — Caddy (reverse proxy)
 
@@ -168,9 +183,11 @@ Free-plan notes:
   matches the free 750 h/month allowance.
 - The filesystem is ephemeral, but that is fine: the databases are
   baked into the image.
-- `TRUST_CF=1` is required (Render traffic passes through Cloudflare;
-  the real IP is taken from `CF-Connecting-IP`) — it is already set in
-  `render.yaml`. The `PORT` variable is provided by Render and must not
+- `TRUST_PROXY=1` and `TRUST_CF=1` are required (Render traffic passes
+  through Cloudflare; the real IP is taken from `CF-Connecting-IP`).
+  `render.yaml` sets both; the image itself defaults to `0`, so a service
+  created by hand needs both variables in the Render dashboard
+  (Environment). The `PORT` variable is provided by Render and must not
   be overridden.
 - The image carries DB-IP Lite only: the GeoLite2 EULA restricts public
   redistribution, so MaxMind data is not baked into the published image. For
@@ -334,7 +351,7 @@ For running without Docker with logs in a file — example
 | `TRUST_PROXY` | `0` | `1` — behind a reverse proxy (IP from the end of `X-Forwarded-For`), `0` — directly exposed (IP from socket, headers untrusted); `.env.example` explicitly sets `1` |
 | `TRUST_CF` | `0` | `1` — trust `CF-Connecting-IP`; only behind Cloudflare/Tunnel and only with `TRUST_PROXY=1`. `0` — ignore (safe for Caddy/VPS) |
 | `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, seconds; clamped to 0–60, invalid values fall back to 1.5 |
-| `RATE_LIMIT_PER_MINUTE` | `6000` | token-bucket burst and sustained requests per IP per minute, `0` — no limit |
+| `RATE_LIMIT_PER_MINUTE` | `6000` | token-bucket burst and sustained requests per client per minute (an IPv4 address or an IPv6 `/64`), `0` — no limit |
 | `RUST_LOG` | `info` | log level |
 
 With `TRUST_PROXY=1`, the client IP is taken from the **last**

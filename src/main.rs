@@ -81,6 +81,20 @@ fn new_hits_cache() -> Cache<String, Arc<Mutex<TokenBucket>>> {
         .build()
 }
 
+/// Rate-limit bucket key for a resolved client IP. An IPv6 client usually
+/// controls a whole /64, so per-address buckets would let it rotate source
+/// addresses and bypass the limit; IPv6 clients share one bucket per /64.
+fn rate_limit_key(ip: &str) -> String {
+    match ip.parse::<std::net::IpAddr>().map(|a| a.to_canonical()) {
+        Ok(std::net::IpAddr::V6(v6)) => {
+            let network = std::net::Ipv6Addr::from(u128::from(v6) & (u128::MAX << 64));
+            format!("{network}/64")
+        }
+        Ok(std::net::IpAddr::V4(v4)) => v4.to_string(),
+        Err(_) => ip.to_string(),
+    }
+}
+
 /// Process-local counters exported on `/metrics`; no external metrics
 /// dependency is needed.
 #[derive(Default)]
@@ -103,7 +117,12 @@ async fn rate_limit_mw(
     if s.rate_limit.per_minute > 0 && path != "/healthz" && path != "/readyz" && path != "/metrics"
     {
         let conn = req.extensions().get::<ConnectInfo<SocketAddr>>().cloned();
-        let key = self_ip(req.headers(), conn.map(|c| c.0), s.trust_proxy, s.trust_cf);
+        let key = rate_limit_key(&self_ip(
+            req.headers(),
+            conn.map(|c| c.0),
+            s.trust_proxy,
+            s.trust_cf,
+        ));
         let retry = {
             let entry = s.rate_limit.hits.get_with(key, || {
                 Arc::new(Mutex::new(TokenBucket::new(
@@ -837,9 +856,15 @@ mod api_tests {
         test_app_with_limit(1_000_000)
     }
 
-    fn test_app_with_limit(per_minute: u32) -> Router {
-        let state = Arc::new(AppState {
-            geo: Arc::new(GeoPool::open(std::path::Path::new("/nonexistent-dir-xyz"))),
+    const NO_GEO_DIR: &str = "/nonexistent-dir-xyz";
+
+    fn test_state(
+        geo_dir: &std::path::Path,
+        per_minute: u32,
+        rdns_timeout: Duration,
+    ) -> Arc<AppState> {
+        Arc::new(AppState {
+            geo: Arc::new(GeoPool::open(geo_dir)),
             geo_cache: Cache::builder().max_capacity(1024).build(),
             ptr_cache: Cache::builder().max_capacity(1024).build(),
             rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
@@ -851,9 +876,20 @@ mod api_tests {
             concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY)),
             trust_proxy: true,
             trust_cf: true,
-            rdns_timeout: Duration::ZERO,
-        });
+            rdns_timeout,
+        })
+    }
+
+    fn test_app_with_state(state: Arc<AppState>) -> Router {
         build_app(state).layer(axum::middleware::from_fn(add_connect_info))
+    }
+
+    fn test_app_with_limit(per_minute: u32) -> Router {
+        test_app_with_state(test_state(
+            std::path::Path::new(NO_GEO_DIR),
+            per_minute,
+            Duration::ZERO,
+        ))
     }
 
     #[test]
@@ -939,6 +975,52 @@ mod api_tests {
                 StatusCode::OK
             );
         }
+    }
+
+    #[test]
+    fn rate_limit_key_groups_ipv6_by_64() {
+        assert_eq!(rate_limit_key("9.9.9.9"), "9.9.9.9");
+        assert_eq!(rate_limit_key("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+        assert_eq!(
+            rate_limit_key("2001:db8:1:2:ffff:ffff:ffff:ffff"),
+            "2001:db8:1:2::/64"
+        );
+        assert_eq!(rate_limit_key("2001:db8:1:3::1"), "2001:db8:1:3::/64");
+        // an IPv4-mapped address is the IPv4 client, not an IPv6 network
+        assert_eq!(rate_limit_key("::ffff:9.9.9.9"), "9.9.9.9");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_is_not_bypassed_by_rotating_ipv6_in_a_64() {
+        let app = test_app_with_limit(2);
+        let get_from = |ip: &str| {
+            Request::get("/ip")
+                .header("x-forwarded-for", ip)
+                .body(Body::empty())
+                .unwrap()
+        };
+        for ip in ["2001:db8:1:2::1", "2001:db8:1:2::2"] {
+            assert_eq!(
+                app.clone().oneshot(get_from(ip)).await.unwrap().status(),
+                StatusCode::OK
+            );
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(get_from("2001:db8:1:2:ffff::3"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        // another /64 has its own budget
+        assert_eq!(
+            app.oneshot(get_from("2001:db8:1:3::1"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -1160,23 +1242,40 @@ mod api_tests {
     }
 
     #[tokio::test]
+    async fn judge_reads_real_geo_databases() {
+        let dir = geo::test_mmdb::TempDir::new("api-judge-geo");
+        geo::test_mmdb::write_city_and_asn(dir.path());
+        let app = test_app_with_state(test_state(dir.path(), 1_000_000, Duration::ZERO));
+        let res = app
+            .oneshot(
+                Request::get("/judge")
+                    .header("x-forwarded-for", "203.0.113.7")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["ip"], "203.0.113.7");
+        assert_eq!(v["geo"]["country_code"], "DE");
+        assert_eq!(v["geo"]["asn"], 64500);
+        assert_eq!(v["geo_source"]["city"], "GeoLite2-City.mmdb");
+        assert_eq!(v["ip_type"], "datacenter");
+        assert!(v["attribution"][0]
+            .as_str()
+            .unwrap_or("")
+            .contains("MaxMind"));
+    }
+
+    #[tokio::test]
     async fn rdns_skipped_when_asn_known() {
         // ASN org present → no DNS round-trip at all (fast, offline-safe)
-        let state = Arc::new(AppState {
-            geo: Arc::new(GeoPool::open(std::path::Path::new("/nonexistent-dir-xyz"))),
-            geo_cache: Cache::builder().max_capacity(16).build(),
-            ptr_cache: Cache::builder().max_capacity(16).build(),
-            rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
-            rate_limit: Arc::new(RateLimit {
-                per_minute: 1_000_000,
-                hits: new_hits_cache(),
-            }),
-            metrics: Arc::new(Metrics::default()),
-            concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY)),
-            trust_proxy: true,
-            trust_cf: true,
-            rdns_timeout: Duration::from_millis(50),
-        });
+        let state = test_state(
+            std::path::Path::new(NO_GEO_DIR),
+            1_000_000,
+            Duration::from_millis(50),
+        );
         let t0 = std::time::Instant::now();
         let res = maybe_rdns(&state, "8.8.8.8", Some("Google LLC")).await;
         assert!(res.is_none());
@@ -1185,21 +1284,11 @@ mod api_tests {
 
     #[tokio::test]
     async fn rdns_skipped_for_private_and_loopback_ips() {
-        let state = Arc::new(AppState {
-            geo: Arc::new(GeoPool::open(std::path::Path::new("/nonexistent-dir-xyz"))),
-            geo_cache: Cache::builder().max_capacity(16).build(),
-            ptr_cache: Cache::builder().max_capacity(16).build(),
-            rdns_sem: Arc::new(tokio::sync::Semaphore::new(16)),
-            rate_limit: Arc::new(RateLimit {
-                per_minute: 1_000_000,
-                hits: new_hits_cache(),
-            }),
-            metrics: Arc::new(Metrics::default()),
-            concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY)),
-            trust_proxy: true,
-            trust_cf: true,
-            rdns_timeout: Duration::from_secs(2),
-        });
+        let state = test_state(
+            std::path::Path::new(NO_GEO_DIR),
+            1_000_000,
+            Duration::from_secs(2),
+        );
         for ip in [
             "127.0.0.1",
             "::1",

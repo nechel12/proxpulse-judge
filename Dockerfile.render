@@ -29,9 +29,11 @@ COPY scripts/download-dbip.sh scripts/docker-entrypoint.sh /app/scripts/
 RUN GEO_DIR=/app/geo bash /app/scripts/download-dbip.sh && chown -R judge:judge /app/geo
 USER judge
 
+# TRUST_PROXY/TRUST_CF намеренно не задаются: в образе безопасный дефолт 0.
+# Render включает оба в render.yaml (его трафик идёт через Cloudflare), а тот
+# же образ, запущенный напрямую с TRUST_CF=1, позволил бы любому клиенту
+# подделать IP, гео и ключ rate-limit заголовком CF-Connecting-IP.
 ENV GEO_DIR=/app/geo \
-    TRUST_PROXY=1 \
-    TRUST_CF=1 \
     RUST_LOG=info
 
 EXPOSE 8000

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Smoke-test a running judge instance. Usage: scripts/smoke.sh [base-url]
+# SMOKE_EXPECT_GEO=1 additionally requires loaded geo databases and a real
+# lookup. The probe IP goes in X-Forwarded-For, so a local container needs
+# TRUST_PROXY=1; behind a reverse proxy the caller's own public IP is used.
 set -euo pipefail
 
 BASE="${1:-http://127.0.0.1:8000}"
@@ -47,6 +50,15 @@ grep -qi '^cache-control: no-store' "$TMP/headers" || fail "/ip: no-store missin
 curl -fsS -D "$TMP/headers" -o /dev/null "$BASE/content"
 if grep -qi '^cache-control:' "$TMP/headers"; then
   fail "/content: unexpected cache-control"
+fi
+
+if [ "${SMOKE_EXPECT_GEO:-0}" = "1" ]; then
+  get /readyz
+  grep -q '"geo_ready":true' "$TMP/body" || fail "/readyz: geo databases not loaded"
+  curl -fsS -H 'X-Forwarded-For: 1.1.1.1' -o "$TMP/body" "$BASE/geo" \
+    || fail "/geo: request failed"
+  grep -q '"country_code":"' "$TMP/body" || fail "/geo: no country_code from the databases"
+  grep -q '"asn":[0-9]' "$TMP/body" || fail "/geo: no asn from the databases"
 fi
 
 echo "smoke: OK ($BASE)"

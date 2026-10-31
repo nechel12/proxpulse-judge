@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- The published image (`Dockerfile.render`) no longer bakes in
+  `TRUST_PROXY=1` and `TRUST_CF=1`. Run directly, it trusted
+  `CF-Connecting-IP` from any client, so IP, geo, and the rate-limit key could
+  be spoofed. **Upgrade note:** Render services created from `render.yaml`
+  already set both variables; services configured by hand must add them.
+- Rate limiting keys IPv6 clients by their `/64` network, so rotating source
+  addresses within one allocation no longer bypasses the limit.
+- Pin all GitHub Actions to commit SHAs.
+
+### Changed
+
+- Scheduled and release builds publish only an image that passed the smoke
+  test with the baked databases and a Trivy scan, with provenance, an SBOM,
+  and a signed GitHub attestation.
+- `:vX.Y.Z` images are published from signed `vX.Y.Z` tags on `main` that
+  match `Cargo.toml` and are never overwritten. Manual workflow runs only
+  refresh `:latest` and `:YYYYMM`, and only from `main`.
+
+### Added
+
+- Tests read real `.mmdb` files (a minimal test writer), covering
+  `maxminddb` open, lookup, decode, verify, and attribution.
+- `scripts/container-smoke.sh` and `SMOKE_EXPECT_GEO=1` for `scripts/smoke.sh`.
+- Release tag and image verification steps in `RELEASING.md`.
+
 ## 0.5.6 — 2026-10-30
 
 ### Added

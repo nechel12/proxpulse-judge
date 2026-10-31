@@ -13,8 +13,7 @@ explain the behavior and tradeoffs in the PR description.
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-bash -n scripts/download-dbip.sh scripts/download-geolite2.sh \
-  scripts/docker-entrypoint.sh scripts/smoke.sh scripts/load.sh
+bash -n scripts/*.sh
 ```
 
 For Docker changes, build the affected image:
