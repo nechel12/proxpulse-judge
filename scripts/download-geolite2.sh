@@ -6,7 +6,7 @@
 # https://www.maxmind.com/en/geolite2/signup → the "Manage License Keys" section.
 set -euo pipefail
 if [ -z "${MAXMIND_LICENSE_KEY:-}" ]; then
-  echo "error: задай MAXMIND_LICENSE_KEY (ключ из личного кабинета MaxMind)" >&2
+  echo "error: set MAXMIND_LICENSE_KEY (a key from your MaxMind account)" >&2
   echo "  export MAXMIND_LICENSE_KEY=xxxx && bash $0" >&2
   exit 1
 fi

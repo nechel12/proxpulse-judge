@@ -1,9 +1,9 @@
-# geo/ — каталог .mmdb баз (в контейнер монтируется read-only, в git не идёт).
+# geo/ — directory for the .mmdb databases (mounted into the container read-only, not in git).
 #
-# Быстрее всего без ключей:  bash scripts/download-dbip.sh
-# Либо положи сюда GeoLite2-City.mmdb / GeoLite2-ASN.mmdb (нужен аккаунт MaxMind).
-# Лицензии: DB-IP Lite — CC BY 4.0 (нужно указание авторства, https://db-ip.com),
-# GeoLite2 — GeoLite EULA + аспекты CC BY-SA 4.0 (нужен аккаунт MaxMind).
-# После обновления баз перезапусти контейнер (гео-кэш живёт в памяти).
-# В docker-compose каталог монтируется read-only: базы скачиваются на
-# хосте скриптом, entrypoint не сможет писать сюда.
+# Fastest, no keys needed:  bash scripts/download-dbip.sh
+# Or place GeoLite2-City.mmdb / GeoLite2-ASN.mmdb here (a MaxMind account is needed).
+# Licenses: DB-IP Lite — CC BY 4.0 (attribution required, https://db-ip.com),
+# GeoLite2 — GeoLite EULA + aspects of CC BY-SA 4.0 (a MaxMind account is needed).
+# After refreshing the databases, restart the container (the geo cache lives in memory).
+# docker-compose mounts this directory read-only: the databases are downloaded on
+# the host by the script, the entrypoint cannot write here.

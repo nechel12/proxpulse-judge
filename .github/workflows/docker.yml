@@ -161,7 +161,7 @@ jobs:
             exit 1
           fi
           bash scripts/release-notes.sh "${tag#v}" > /dev/null
-          # checkout может оставить на теге лёгкую ссылку: берём аннотированный объект
+          # checkout may leave a lightweight ref on the tag: take the annotated object
           git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
           printf 'proxpulse-release namespaces="git" %s\n' \
             "$(cut -d' ' -f1,2 docs/proxpulse-release.pub)" > "$RUNNER_TEMP/allowed_signers"

@@ -4,7 +4,8 @@ A release is a signed git tag on `main`; the `docker` workflow verifies the
 tag, publishes the tested multi-arch image, and creates the GitHub release
 with Linux binaries.
 
-1. **Prepare** (in a pull request: `main` only accepts PRs with green CI)
+1. **Prepare** (a pull request or a direct commit on `main`; CI has to be green
+   before the tag)
    - Update `CHANGELOG.md`: rename `[Unreleased]` to `[X.Y.Z] — YYYY-MM-DD`,
      add a fresh empty `[Unreleased]`, and update the compare links at the
      bottom. The release notes are taken from this section; a tag without it
@@ -25,7 +26,7 @@ with Linux binaries.
      CI runs the same check on both architectures before every publish.
 
 3. **Publish**
-   - Merge the release PR into `main`; wait for the `test`, `msrv`, and
+   - Land the release commit on `main`; wait for the `test`, `msrv`, and
      `smoke` jobs.
    - Create a signed tag on that `main` commit and push it:
 
