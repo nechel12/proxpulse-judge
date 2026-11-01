@@ -7,12 +7,12 @@ services:
     container_name: proxpulse-judge
     restart: unless-stopped
     ports:
-      - "127.0.0.1:${PORT:-8000}:${PORT:-8000}" # наружу смотрит только реверс-прокси
+      - "127.0.0.1:${PORT:-8000}:${PORT:-8000}" # only the reverse proxy faces outward
     volumes:
       - ./geo:/app/geo:ro
     env_file:
       - .env
-    # Сервис ничего не пишет на диск и не нуждается в привилегиях.
+    # The service writes nothing to disk and needs no privileges.
     read_only: true
     tmpfs:
       - /tmp
@@ -20,7 +20,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # Базы держатся в RAM (DB-IP City + ASN ≈ 200 МБ) плюс кэши.
+    # Databases live in RAM (DB-IP City + ASN ≈ 200 MB) plus caches.
     mem_limit: 512m
     logging:
       driver: json-file
@@ -41,4 +41,4 @@ services:
 
 networks:
   proxpulse-net:
-    name: proxpulse-net # фиксированное имя: compose создаст сеть, если её нет
+    name: proxpulse-net # fixed name: compose creates the network if it is missing

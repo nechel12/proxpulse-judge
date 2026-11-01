@@ -1,18 +1,18 @@
-# CI и публикация.
-# PR и main: тесты (stable + MSRV), линтеры, smoke-тест образа runtime.
-# Schedule (раз в месяц, свежие DB-IP Lite) и ручной запуск с main пушат
-# мультиархитектурный (amd64 + arm64) образ render как :latest + :YYYYMM.
-# Подписанный тег vX.Y.Z (см. RELEASING.md) дополнительно публикует
-# неизменяемый :vX.Y.Z и создаёт GitHub release с Linux-бинарниками.
-# Каждая архитектура собирается на своём нативном раннере, проходит
-# smoke-тест со вшитыми базами и Trivy, и только потом пушится; в реестр
-# уходят provenance, SBOM и подписанная GitHub attestation.
-# Тестовая сборка идёт БЕЗ кэша слоёв специально: иначе закэшируется и стадия
-# скачивания баз, и monthly-обновление молча перестанет обновляться.
-# Actions закреплены по SHA; Dependabot обновляет их вместе с комментарием.
-# Пакет обычно наследует public от публичного репо; если Render ругнётся
-# Image Pull Failed — проверь видимость: профиль → Packages →
-# затем proxpulse-judge → Package settings → Change visibility → public.
+# CI and publishing.
+# PR and main: tests (stable + MSRV), linters, smoke test of the runtime image.
+# Schedule (monthly, fresh DB-IP Lite) and a manual run from main push the
+# multi-arch (amd64 + arm64) render image as :latest + :YYYYMM.
+# A signed vX.Y.Z tag (see RELEASING.md) additionally publishes the
+# immutable :vX.Y.Z and creates a GitHub release with Linux binaries.
+# Each architecture builds on its own native runner, passes a smoke test
+# with the baked databases and a Trivy scan, and only then is pushed; provenance,
+# an SBOM and a signed GitHub attestation go to the registry.
+# Test builds run WITHOUT a layer cache on purpose: otherwise the database
+# download stage would be cached and the monthly refresh would silently stop.
+# Actions are pinned by SHA; Dependabot updates them together with the comment.
+# The package usually inherits public from the public repo; if Render complains
+# Image Pull Failed — check visibility: profile → Packages →
+# then proxpulse-judge → Package settings → Change visibility → public.
 name: docker
 
 on:
@@ -21,7 +21,7 @@ on:
     tags: ["v*"]
   pull_request:
   schedule:
-    - cron: "0 4 3 * *" # 3-е число каждого месяца, 04:00 UTC (как cron в README)
+    - cron: "0 4 3 * *" # 3rd of every month, 04:00 UTC (same cron as in the README)
   workflow_dispatch:
 
 permissions:
@@ -29,8 +29,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  # Отменяем только устаревшие прогоны PR и main; scheduled, ручные и
-  # релизные (тег) сборки всегда доходят до конца.
+  # Only stale PR and main runs are cancelled; scheduled, manual and
+  # release (tag) builds always run to completion.
   cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref_type == 'branch') }}
 
 jobs:
@@ -42,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # ветка stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
         with:
           toolchain: stable
           components: clippy,rustfmt
@@ -91,7 +91,7 @@ jobs:
         id: msrv
         run: echo "version=$(awk -F'"' '/^rust-version = / { print $2; exit }' Cargo.toml)" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # ветка stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
 
@@ -123,8 +123,8 @@ jobs:
       - name: Smoke and load checks
         run: bash scripts/container-smoke.sh proxpulse-judge:smoke -v "$PWD/geo:/app/geo:ro"
 
-  # Общие проверки и теги для публикации (schedule, ручной запуск с main,
-  # релизный тег).
+  # Shared checks and tags for publishing (schedule, manual run from main,
+  # release tag).
   prepare:
     needs: [test, msrv, smoke]
     if: >-
@@ -142,10 +142,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # для проверки тега нужен origin/main
+          fetch-depth: 0 # tag verification needs origin/main
 
-      # Релиз — только подписанный ключом docs/proxpulse-release.pub тег на
-      # main, совпадающий с версией в Cargo.toml и описанный в CHANGELOG.
+      # A release is a tag on main signed with the docs/proxpulse-release.pub key,
+      # matching the Cargo.toml version and described in CHANGELOG.
       - name: Verify release tag
         if: github.ref_type == 'tag'
         run: |
@@ -197,7 +197,7 @@ jobs:
             exit 1
           fi
 
-  # Каждая архитектура — на нативном раннере: тест, скан, push по digest.
+  # Each architecture on a native runner: test, scan, push by digest.
   image:
     needs: prepare
     strategy:
@@ -245,9 +245,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Вторая сборка берёт все слои из кэша первой (тот же builder), поэтому
-      # в реестр уходят ровно протестированные слои; свежая загрузка баз не
-      # повторяется. См. docs.docker.com/build/ci/github-actions/test-before-push/
+      # The second build takes every layer from the first one's cache (same builder),
+      # so exactly the tested layers reach the registry and the databases are not
+      # downloaded again. See docs.docker.com/build/ci/github-actions/test-before-push/
       - name: Push the tested image by digest
         id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -273,8 +273,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Собирает мультиархитектурный индекс из протестированных digest и
-  # вешает на него теги и attestation.
+  # Builds the multi-arch index from the tested digests and attaches
+  # the tags and the attestation to it.
   publish:
     needs: [prepare, image]
     runs-on: ubuntu-latest
@@ -327,20 +327,20 @@ jobs:
           subject-digest: ${{ steps.index.outputs.digest }}
           push-to-registry: true
 
-      # Авто-редеплой своего Render-сервиса после свежей сборки.
-      # Секретом владеет только владелец форка: в этом репо секрета нет
-      # и шаг скипается. Секрет лежит в env job (не step): if у шага
-      # вычисляется до применения его собственного env.
-      # Форкам: Render dashboard → service → Settings → Deploy Hook →
-      # скопировать URL в Secrets → RENDER_DEPLOY_HOOK, плюс включить
-      # Actions во вкладке Actions форка (по умолчанию выключены; шедула
-      # живёт только на default branch и отмирает после 60 дней без
-      # активности — см. README, вариант В).
+      # Automatic redeploy of your own Render service after a fresh build.
+      # Only the fork owner holds the secret: this repo has no secret,
+      # so the step is skipped. The secret lives in the job env (not step env): a step's if
+      # is evaluated before its own env is applied.
+      # For forks: Render dashboard → service → Settings → Deploy Hook →
+      # copy the URL into Secrets → RENDER_DEPLOY_HOOK, and enable
+      # Actions in the fork's Actions tab (off by default; the schedule
+      # lives only on the default branch and dies after 60 days without
+      # activity — see README, variant C).
       - name: Trigger Render redeploy
         if: ${{ env.RENDER_DEPLOY_HOOK != '' }}
         run: curl -fsS "$RENDER_DEPLOY_HOOK"
 
-  # Статические (musl) Linux-бинарники для релиза.
+  # Static (musl) Linux binaries for the release.
   binaries:
     needs: prepare
     if: github.ref_type == 'tag'
@@ -359,7 +359,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # ветка stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch
         with:
           toolchain: stable
           targets: ${{ matrix.target }}

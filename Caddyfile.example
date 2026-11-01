@@ -1,24 +1,24 @@
-# Caddy ставится ОТДЕЛЬНО (на хосте или своим контейнером).
-# Подставь свой поддомен (A-запись поддомена -> IP этого сервера).
+# Caddy is installed SEPARATELY (on the host or as its own container).
+# A dedicated subdomain is expected (an A-record for the subdomain -> this server's IP).
 #
-# ВАЖНО: Caddy 2.5+ по умолчанию НЕ доверяет входящему X-Forwarded-For
-# и заменяет его IP-адресом непосредственного клиента. Тогда judge не
-# увидит реальный IP, который проверяемый прокси положил в XFF, и выдаст
-# ложный elite. trusted_proxies ниже включает сохранение цепочки; это
-# безопасно только потому, что judge слушает 127.0.0.1 (см.
-# docker-compose.yml), а не смотрит в интернет напрямую.
+# IMPORTANT: Caddy 2.5+ does NOT trust the incoming X-Forwarded-For by default
+# and replaces it with the immediate client's IP. The judge would then not
+# see the real IP the checked proxy put into XFF and report a false elite.
+# trusted_proxies below restores the chain; that is
+# safe only because the judge listens on 127.0.0.1 (see
+# docker-compose.yml) rather than facing the internet directly.
 #
-# Caddy всё равно добавляет реальный peer последним, поэтому judge
-# использует последнюю запись для IP, а предыдущие — для анализа утечек.
+# Caddy still appends the real peer last, so the judge
+# uses the last entry for the IP and the earlier ones for leak analysis.
 check.yourdomain.com {
     reverse_proxy 127.0.0.1:8000 {
         trusted_proxies 0.0.0.0/0 ::/0
-        # Caddy не использует Cloudflare: не даём подделать CF-заголовки.
-        # Если Cloudflare стоит ПЕРЕД Caddy, удали эти две строки,
-        # настрой trusted_proxies диапазонами Cloudflare, закрой порты
-        # 80/443 от прямых подключений мимо Cloudflare (файрвол или
-        # Authenticated Origin Pulls: trusted_proxies контролирует только
-        # X-Forwarded-*, но не CF-Connecting-IP) и включи TRUST_CF=1.
+        # Caddy does not use Cloudflare: nobody may forge CF headers.
+        # If Cloudflare sits IN FRONT OF Caddy, remove these two lines,
+        # set trusted_proxies to Cloudflare's ranges, restrict ports
+        # 80/443 to Cloudflare addresses only (firewall or
+        # Authenticated Origin Pulls: trusted_proxies governs only
+        # X-Forwarded-*, not CF-Connecting-IP) and set TRUST_CF=1.
         header_up -CF-Connecting-IP
         header_up -True-Client-IP
     }

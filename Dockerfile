@@ -1,23 +1,23 @@
-# Один Dockerfile, две цели (последняя стадия — цель по умолчанию):
-#   runtime — VPS: базы в смонтированном /app/geo (docker-compose.yml);
-#             если .mmdb нет, entrypoint сам скачает DB-IP Lite;
-#   render  — free-hosting (Render и т.п.): DB-IP Lite вшиты в образ,
-#             диск не нужен, контейнер stateless, curl внутри нет.
-#             Пример: docker build --target render .
-# DB-IP Lite распространяется под CC BY 4.0 — атрибуция обязательна:
-# "IP Geolocation by DB-IP" со ссылкой https://db-ip.com
-# (см. также GET / — лицензии отдаются самим сервисом).
-# MaxMind GeoLite2 в образ класть НЕЛЬЗЯ (EULA запрещает публичную
-# редистрибуцию) — для MaxMind используй цель runtime + volume.
-# Базовые образы закреплены по digest; их обновляет Dependabot.
-# TRUST_PROXY/TRUST_CF намеренно не задаются: в образе безопасный дефолт 0,
-# топологию задаёт окружение (.env, render.yaml). Образ с TRUST_CF=1,
-# запущенный напрямую, позволил бы подделать IP заголовком CF-Connecting-IP.
+# One Dockerfile, two targets (the last stage is the default target):
+#   runtime — VPS: databases in the mounted /app/geo (docker-compose.yml);
+#             if no .mmdb is present, the entrypoint downloads DB-IP Lite;
+#   render  — free hosting (Render and similar): DB-IP Lite baked into the image,
+#             no disk needed, the container is stateless, no curl inside.
+#             Example: docker build --target render .
+# DB-IP Lite is distributed under CC BY 4.0 — attribution is required:
+# "IP Geolocation by DB-IP" with a link to https://db-ip.com
+# (see also GET / — the service serves the licenses itself).
+# MaxMind GeoLite2 must NOT be baked into the image (the EULA forbids public
+# redistribution) — for MaxMind use the runtime target + a volume.
+# Base images are pinned by digest; Dependabot updates them.
+# TRUST_PROXY/TRUST_CF are deliberately unset: the image keeps the safe default 0,
+# the environment defines the topology (.env, render.yaml). An image with TRUST_CF=1
+# run directly would let anyone spoof the IP with a CF-Connecting-IP header.
 
 FROM rust:1.99-trixie@sha256:09027f873d45b8ecd1dc86f1fa13b7a62b875c961f017a0e331267b350430137 AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-# предварительно скачать зависимости для кэширования слоя
+# prefetch dependencies for layer caching
 RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
     cargo build --release --locked && rm -rf src target/release/.fingerprint/proxpulse-judge* target/release/proxpulse-judge*
 COPY src ./src
@@ -42,16 +42,16 @@ LABEL org.opencontainers.image.title="proxpulse-judge" \
       org.opencontainers.image.source="https://github.com/nechel12/proxpulse-judge" \
       org.opencontainers.image.licenses="Apache-2.0"
 
-# Инструменты скачивания DB-IP Lite: в runtime — для фолбэка entrypoint,
-# в render — только на этапе сборки.
+# DB-IP Lite download tools: in runtime for the entrypoint fallback,
+# in render only at build time.
 FROM base AS fetcher
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl gzip \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts/download-dbip.sh /app/scripts/
 
-# Свежие базы (долгая стадия: city ~130 МБ); скрипт проверяет их тем же
-# бинарником (--check-geo) до того, как положить на место.
+# Fresh databases (slow stage: city ~130 MB); the script validates them with the
+# same binary (--check-geo) before putting them in place.
 FROM fetcher AS dbip
 RUN GEO_DIR=/app/geo bash /app/scripts/download-dbip.sh
 

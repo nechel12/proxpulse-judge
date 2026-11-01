@@ -1,13 +1,13 @@
-# nginx перед proxpulse-judge (аналог Caddyfile.example).
-# В .env: TRUST_PROXY=1, TRUST_CF=0. judge слушает 127.0.0.1 (docker-compose.yml).
+# nginx in front of proxpulse-judge (the Caddyfile.example equivalent).
+# In .env: TRUST_PROXY=1, TRUST_CF=0. The judge listens on 127.0.0.1 (docker-compose.yml).
 #
-# ВАЖНО: не добавляй сюда X-Real-IP, Via или Forwarded (их часто кладут
-# шаблоны nginx): judge считает их признаками прокси, и все проверки выйдут
-# "anonymous". Если без них никак — перечисли их в EDGE_HEADERS
-# (например, EDGE_HEADERS=x-real-ip), чтобы они не приписывались
-# проверяемому прокси. Модуль realip (set_real_ip_from) тоже не нужен.
+# IMPORTANT: X-Real-IP, Via and Forwarded must not be added here (nginx templates
+# often set them): the judge treats them as proxy telltales and every check would
+# come out "anonymous". If they cannot be avoided, list them in EDGE_HEADERS
+# (e.g. EDGE_HEADERS=x-real-ip) so they are not attributed
+# to the checked proxy. The realip module (set_real_ip_from) is not needed either.
 #
-# Сертификат: certbot --nginx -d check.yourdomain.com (или любой ACME-клиент).
+# Certificate: certbot --nginx -d check.yourdomain.com (or any ACME client).
 server {
     listen 80;
     listen [::]:80;
@@ -29,14 +29,14 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
-        # Дописывает адрес подключившегося к цепочке, которую прислал
-        # проверяемый прокси: judge берёт последнюю запись как IP клиента,
-        # а остальные анализирует на утечки.
+        # Appends the connecting address to the chain the checked
+        # proxy sent: the judge takes the last entry as the client IP
+        # and analyses the rest for leaks.
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        # Cloudflare перед nginx нет: не даём подделать CF-заголовки.
-        # Если Cloudflare стоит ПЕРЕД nginx, удали эти две строки, пусти на
-        # 80/443 только диапазоны Cloudflare (или Authenticated Origin Pulls)
-        # и включи TRUST_CF=1.
+        # No Cloudflare in front of nginx: nobody may forge CF headers.
+        # If Cloudflare sits IN FRONT OF nginx, remove these two lines, allow only
+        # Cloudflare ranges on 80/443 (or Authenticated Origin Pulls)
+        # and set TRUST_CF=1.
         proxy_set_header CF-Connecting-IP "";
         proxy_set_header True-Client-IP "";
     }

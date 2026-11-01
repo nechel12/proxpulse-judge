@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Качает DB-IP Lite (City + ASN) без ключей.
-# ЛИЦЕНЗИЯ: базы распространяются под CC BY 4.0 — при показе результатов
-# нужно указание авторства со ссылкой https://db-ip.com
-# (подробности: https://db-ip.com/db/lite.php).
-# Выходят раз в месяц, САМИ НЕ ОБНОВЛЯЮТСЯ: запускай скрипт руками или
-# по cron, после чего перезапусти контейнер (docker compose restart judge).
-# Каталог назначения: $GEO_DIR, иначе ../geo относительно скрипта.
-# Entrypoint контейнера сам зовёт этот скрипт, если в $GEO_DIR нет .mmdb.
+# Downloads DB-IP Lite (City + ASN) without keys.
+# LICENSE: the databases are distributed under CC BY 4.0 — when showing results,
+# attribution with a link to https://db-ip.com is required
+# (details: https://db-ip.com/db/lite.php).
+# They are released monthly and DO NOT UPDATE THEMSELVES: run the script manually or
+# via cron, then restart the container (docker compose restart judge).
+# Target directory: $GEO_DIR, otherwise ../geo relative to the script.
+# The container entrypoint calls this script itself when $GEO_DIR has no .mmdb.
 set -euo pipefail
 
-# сначала пробуем текущий месяц, в первые дни месяца файла может не быть —
-# тогда берём прошлый (привязка к 15-му числу избегает переполнения GNU date
-# 31-го числа на месяцах из 28–30 дней; -v-1m — фолбэк для BSD/macOS date)
+# try the current month first; in the first days of a month the file may be missing —
+# then take the previous one (anchoring to the 15th avoids GNU date overflowing
+# on the 31st into 28–30-day months; -v-1m is the BSD/macOS date fallback)
 PREV_MONTH="$(date -d "$(date +%Y-%m-15) -1 month" +%Y-%m 2>/dev/null || date -v-1m +%Y-%m 2>/dev/null || true)"
 MONTHS="$(date +%Y-%m) $PREV_MONTH"
-if [ $# -ge 1 ]; then MONTHS="$1"; fi   # можно передать 2026-08 вручную
+if [ $# -ge 1 ]; then MONTHS="$1"; fi   # a month such as 2026-08 can be passed manually
 
 DIR="${GEO_DIR:-$(dirname "$0")/../geo}"
 mkdir -p "$DIR"
@@ -23,8 +23,8 @@ TMP="$(mktemp -d "$DIR/.dbip.XXXXXX")"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
-# --retry покрывает временные сбои CDN/сети; --max-time не даёт
-# зависшему соединению навсегда заблокировать запуск контейнера.
+# --retry covers transient CDN/network failures; --max-time prevents a
+# hung connection from blocking container startup forever.
 CURL=(
   curl --fail --location --silent --show-error
   --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 300
@@ -48,8 +48,8 @@ if [ -z "$GOT" ]; then
   exit 1
 fi
 
-# Проверить gzip до изменения существующих файлов, затем переместить готовые файлы
-# на место атомарно. Неудачная загрузка никогда не оставляет частичный .mmdb.
+# Validate gzip before touching existing files, then move finished files
+# into place atomically. A failed download never leaves a partial .mmdb.
 gunzip -t "$TMP/city.gz" "$TMP/asn.gz"
 gunzip -c "$TMP/city.gz" > "$TMP/dbip-city-lite.mmdb"
 gunzip -c "$TMP/asn.gz" > "$TMP/dbip-asn-lite.mmdb"
@@ -58,8 +58,8 @@ gunzip -c "$TMP/asn.gz" > "$TMP/dbip-asn-lite.mmdb"
   exit 1
 }
 
-# Полная структурная проверка перед заменой файлов, используемых
-# сервисом. Пропускается, если бинарник judge недоступен (запуск только на хосте).
+# Full structural validation before replacing the files used by the
+# service. Skipped when the judge binary is not available (host-only run).
 BIN="${JUDGE_BIN:-/app/proxpulse-judge}"
 if [ -x "$BIN" ]; then
   echo "== validating downloaded databases"
