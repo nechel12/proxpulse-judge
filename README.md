@@ -265,7 +265,8 @@ passthrough and `/healthz` as the health check are required.
 | GET | `/geo` | `{"ip", "geo", "source", "attribution"}` — country/city/ASN from local DBs |
 | GET | `/type` | `{"ip", "ip_type", "signals"}` — IP type with reasoning |
 | GET | `/content` | fixed bytes — integrity reference |
-| GET | `/judge?direct_ip=...` | everything at once + `anonymity`, `content_sha256` |
+| GET | `/judge?direct_ip=...&nonce=...` | everything at once + `anonymity`, `content_sha256`; signed when `SIGNING_KEY` is set |
+| GET | `/key` | `{"alg", "key_id", "public_key"}` — the signing key; `404` when signing is off |
 | GET | `/healthz` | `{"ok": true}` — liveness probe |
 | GET | `/readyz` | `{"ok", "geo_ready", "geo_sources"}` — readiness |
 | GET | `/metrics` | Prometheus text counters (optionally behind `METRICS_TOKEN`) |
@@ -351,6 +352,31 @@ organization (and the PTR record when the organization is unknown);
    it changes nothing), at most 16 resolutions in parallel, answers cached
    for an hour.
 5. A liveness check is just `GET /generate_204` (empty 204, the cheapest request).
+
+### Signed answers
+
+Anonymity can only be judged over plain HTTP: inside an HTTPS tunnel the
+proxy cannot add headers. Over HTTP it could also rewrite the answer, for
+example to claim `elite`. With `SIGNING_KEY` set, every `/judge` answer gets
+an Ed25519 signature in `X-Judge-Signature` (base64) and the key id in
+`X-Judge-Key-Id`. The signed message is
+
+```text
+proxpulse-judge-v1\n<nonce>\n<direct_ip>\n<response body>
+```
+
+with the `nonce` (8–64 characters of `A-Z a-z 0-9 _ -`, otherwise ignored)
+and `direct_ip` query values as received; absent values are empty. The
+checker sends a random nonce with every request and fetches `/key` directly,
+not through a proxy, so a rewritten or replayed answer fails verification.
+
+```sh
+openssl rand -base64 32   # any 32 random bytes: put the output in SIGNING_KEY
+```
+
+The public key is derived from it and served at `/key`. Keep the seed
+secret; a new seed changes the key, and checkers pick it up at their next
+check.
 
 ## Public instances
 
@@ -453,7 +479,8 @@ For running without Docker with logs in a file — example
 | `EDGE_HEADERS` | empty | comma-separated headers the deployment's reverse proxy adds (e.g. `x-real-ip,via`); they are neither analysed nor echoed. Only with `TRUST_PROXY=1`; `x-forwarded-for` is not allowed |
 | `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, seconds; clamped to 0–60, invalid values fall back to 1.5 |
 | `RATE_LIMIT_PER_MINUTE` | `6000` | token-bucket burst and sustained requests per client per minute (an IPv4 address or an IPv6 `/64`), `0` — no limit |
-| `METRICS_TOKEN` | empty | when set, `/metrics` requires `Authorization: Bearer <token>` |
+| `METRICS_TOKEN` | empty | when set, `/metrics` requires `Authorization: Bearer <token>`; send it over HTTPS only |
+| `SIGNING_KEY` | empty | 32 bytes in base64 (`openssl rand -base64 32`): signs `/judge` answers, see [Signed answers](#signed-answers); a malformed key stops startup |
 | `RUST_LOG` | `info` | log level |
 
 `TRUST_PROXY` and `TRUST_CF` accept `1`/`0`, `true`/`false`, `yes`/`no`,

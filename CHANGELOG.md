@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Signed answers: with `SIGNING_KEY` set, `/judge` answers carry an Ed25519
+  signature over the body, the request's `nonce` and `direct_ip`
+  (`X-Judge-Signature`, `X-Judge-Key-Id`), and `/key` serves the public key.
+  A proxy can no longer rewrite an answer over plain HTTP unnoticed.
+
 ## [0.6.0] — 2026-10-31
 
 ### Security
