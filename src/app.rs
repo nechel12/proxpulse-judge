@@ -28,6 +28,7 @@ use crate::logic::{
 };
 use crate::metrics::{Metrics, inc};
 use crate::ratelimit::RateLimit;
+use crate::sign::{Signer, valid_nonce};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const REPOSITORY: &str = "https://github.com/nechel12/proxpulse-judge";
@@ -48,6 +49,7 @@ pub struct AppState {
     pub rdns_timeout: Duration,
     pub edge_headers: Vec<String>,
     pub metrics_token: Option<String>,
+    pub signer: Option<Arc<Signer>>,
 }
 
 impl AppState {
@@ -68,6 +70,7 @@ impl AppState {
             rdns_timeout: cfg.rdns_timeout,
             edge_headers: cfg.edge_headers.clone(),
             metrics_token: cfg.metrics_token.clone(),
+            signer: cfg.signer.clone().map(Arc::new),
         }
     }
 }
@@ -191,6 +194,8 @@ async fn access_log_mw(req: axum::extract::Request, next: axum::middleware::Next
 #[derive(Deserialize)]
 struct JudgeParams {
     direct_ip: Option<String>,
+    /// Random value from the checker, bound into the signature.
+    nonce: Option<String>,
 }
 
 /// Join all values of a header with ", " so duplicate header lines are
@@ -480,12 +485,29 @@ async fn content() -> impl IntoResponse {
     ([(CONTENT_TYPE, "application/json")], logic::FIXED_CONTENT)
 }
 
+/// Public key for /judge signatures; 404 when signing is off.
+async fn key(State(s): State<Arc<AppState>>) -> Response {
+    match &s.signer {
+        Some(signer) => Json(serde_json::json!({
+            "alg": "ed25519",
+            "key_id": signer.key_id,
+            "public_key": signer.public_key,
+        }))
+        .into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "signing is not enabled" })),
+        )
+            .into_response(),
+    }
+}
+
 async fn judge(
     State(s): State<Arc<AppState>>,
     conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(p): Query<JudgeParams>,
-) -> impl IntoResponse {
+) -> Response {
     let me = self_ip(&s, &headers, Some(conn.0));
     let (view, chain) = proxy_view(&s, &headers, &me);
     // garbage direct_ip is ignored instead of compared (a header value
@@ -497,7 +519,7 @@ async fn judge(
     let ptr = maybe_rdns(&s, &me, g.aso.as_deref()).await;
     let (t, signals) = classify_ip(g.aso.as_deref(), ptr.as_deref());
 
-    Json(serde_json::json!({
+    let body = serde_json::json!({
         "ip": me,
         "headers": view,
         "xff_chain": chain,
@@ -509,7 +531,23 @@ async fn judge(
         "type_signals": signals,
         "content_version": logic::CONTENT_VERSION,
         "content_sha256": logic::content_sha256(),
-    }))
+    })
+    .to_string()
+    .into_bytes();
+    let signature = s.signer.as_ref().map(|signer| {
+        let nonce = p.nonce.as_deref().filter(|n| valid_nonce(n)).unwrap_or("");
+        let sig = signer.sign(nonce, p.direct_ip.as_deref().unwrap_or(""), &body);
+        (sig, signer.key_id.clone())
+    });
+    let mut res = ([(CONTENT_TYPE, "application/json")], body).into_response();
+    if let Some((sig, key_id)) = signature {
+        let h = res.headers_mut();
+        if let (Ok(sig), Ok(id)) = (HeaderValue::from_str(&sig), HeaderValue::from_str(&key_id)) {
+            h.insert("x-judge-signature", sig);
+            h.insert("x-judge-key-id", id);
+        }
+    }
+    res
 }
 
 pub fn build_app(state: Arc<AppState>) -> Router {
@@ -525,6 +563,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .route("/type", get(ip_type))
         .route("/content", get(content))
         .route("/judge", get(judge))
+        .route("/key", get(key))
         .layer(axum::middleware::from_fn(timeout_mw))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -574,6 +613,7 @@ mod api_tests {
             rate_per_minute: per_minute,
             edge_headers: vec![],
             metrics_token: None,
+            signer: None,
         }
     }
 
@@ -823,6 +863,56 @@ mod api_tests {
             assert!(v["headers"].get("x-forwarded-for").is_none(), "{path}");
             assert_eq!(v["xff_chain"], serde_json::json!([]), "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn judge_answers_are_signed_with_the_published_key() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        // Without a key: no signature headers and no /key.
+        let res = test_app()
+            .oneshot(get_with("/judge?direct_ip=1.1.1.1&nonce=abcdefgh12", &[]))
+            .await
+            .unwrap();
+        assert!(res.headers().get("x-judge-signature").is_none());
+        let res = test_app().oneshot(get_with("/key", &[])).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+
+        let mut cfg = test_config(1_000_000, Duration::ZERO);
+        cfg.signer = Some(
+            crate::sign::Signer::from_seed_b64("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
+                .unwrap(),
+        );
+        let key = json(test_app_with(&cfg), get_with("/key", &[])).await;
+        assert_eq!(key["alg"], "ed25519");
+        let public: [u8; 32] = STANDARD
+            .decode(key["public_key"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let vk = VerifyingKey::from_bytes(&public).unwrap();
+
+        let res = test_app_with(&cfg)
+            .oneshot(get_with("/judge?direct_ip=1.1.1.1&nonce=abcdefgh12", &[]))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.headers()["x-judge-key-id"],
+            key["key_id"].as_str().unwrap()
+        );
+        let sig = STANDARD
+            .decode(res.headers()["x-judge-signature"].as_bytes())
+            .unwrap();
+        let sig = Signature::from_slice(&sig).unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        let ok = crate::sign::message("abcdefgh12", "1.1.1.1", &body);
+        assert!(vk.verify(&ok, &sig).is_ok());
+        // Another nonce or direct_ip does not verify: no replay, no rewrite.
+        let replay = crate::sign::message("otherNonce1", "1.1.1.1", &body);
+        assert!(vk.verify(&replay, &sig).is_err());
+        let moved = crate::sign::message("abcdefgh12", "2.2.2.2", &body);
+        assert!(vk.verify(&moved, &sig).is_err());
     }
 
     #[tokio::test]
