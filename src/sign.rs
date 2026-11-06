@@ -6,9 +6,10 @@
 //! a rewritten or replayed answer fails verification in the checker.
 //!
 //! Without `SIGNING_KEY` the key is generated at startup and lives only in
-//! memory. That is enough because checkers fetch `/key` directly (not through
-//! a proxy) at the start of every check; a fixed key is needed only to share
-//! it between replicas or keep it across restarts.
+//! memory. Clients fetch `/key` for every run, so a new key reaches them at the
+//! next one; a fixed key is needed to share it between replicas, keep it across
+//! restarts or pin it. A signature is only as trustworthy as the channel that
+//! delivered the key: see "Signed answers" in the README.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -74,19 +75,26 @@ impl Signer {
     }
 
     /// Base64 signature of [`message`].
-    pub fn sign(&self, nonce: &str, direct_ip: &str, body: &[u8]) -> String {
-        STANDARD.encode(self.key.sign(&message(nonce, direct_ip, body)).to_bytes())
+    pub fn sign(&self, challenge: &str, direct_ip: &str, body: &[u8]) -> String {
+        STANDARD.encode(
+            self.key
+                .sign(&message(challenge, direct_ip, body))
+                .to_bytes(),
+        )
     }
 }
 
-/// `proxpulse-judge-v1\n<nonce>\n<direct_ip>\n<body>`; absent values are
-/// empty strings.
-pub fn message(nonce: &str, direct_ip: &str, body: &[u8]) -> Vec<u8> {
+/// `proxpulse-judge-v1\n<challenge>\n<direct_ip>\n<body>`; absent values are
+/// empty strings. `challenge` is the client's `nonce` query value: data bound
+/// into the message to stop replays, not a cipher nonce (Ed25519 derives its
+/// own). Only the body may contain a line feed: one in an earlier field would
+/// move bytes between fields without changing the message.
+pub fn message(challenge: &str, direct_ip: &str, body: &[u8]) -> Vec<u8> {
     let mut m = Vec::with_capacity(
-        SIGNATURE_CONTEXT.len() + nonce.len() + direct_ip.len() + body.len() + 2,
+        SIGNATURE_CONTEXT.len() + challenge.len() + direct_ip.len() + body.len() + 2,
     );
     m.extend_from_slice(SIGNATURE_CONTEXT);
-    m.extend_from_slice(nonce.as_bytes());
+    m.extend_from_slice(challenge.as_bytes());
     m.push(b'\n');
     m.extend_from_slice(direct_ip.as_bytes());
     m.push(b'\n');
@@ -128,7 +136,23 @@ mod tests {
                 .is_err()
         );
         assert_eq!(s.key_id.len(), 8);
-        assert!(!format!("{s:?}").contains(SEED));
+    }
+
+    #[test]
+    fn debug_shows_only_the_key_id_and_origin() {
+        let fixed = Signer::from_seed_b64(SEED).unwrap();
+        assert_eq!(
+            format!("{fixed:?}"),
+            r#"Signer { key_id: "56475aa7", ephemeral: false }"#
+        );
+        let generated = Signer::generate().unwrap();
+        assert_eq!(
+            format!("{generated:?}"),
+            format!(
+                r#"Signer {{ key_id: "{}", ephemeral: true }}"#,
+                generated.key_id
+            )
+        );
     }
 
     /// Shared with the checker's `judge_sig` tests: both sides must agree.

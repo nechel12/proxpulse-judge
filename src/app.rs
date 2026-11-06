@@ -379,6 +379,7 @@ async fn index(State(s): State<Arc<AppState>>) -> impl IntoResponse {
             "GET /type",
             "GET /content",
             "GET /judge",
+            "GET /key",
             "GET /healthz",
             "GET /readyz",
             "GET /metrics",
@@ -502,9 +503,12 @@ async fn judge(
 ) -> Response {
     let me = self_ip(&s, &headers, Some(conn.0));
     let (view, chain) = proxy_view(&s, &headers, &me);
+    // A line feed would move bytes between the signed fields (sign::message),
+    // so such a value counts as absent for the verdict and the signature alike.
+    let direct_raw = p.direct_ip.as_deref().filter(|d| !d.contains('\n'));
     // garbage direct_ip is ignored instead of compared (a header value
     // could otherwise "match" it and fake a transparent verdict)
-    let direct = p.direct_ip.as_deref().and_then(normalize_host);
+    let direct = direct_raw.and_then(normalize_host);
     let level = anonymity_level(&view, direct.as_deref(), s.trust_cf);
 
     let g = geo_cached(&s, &me);
@@ -526,10 +530,8 @@ async fn judge(
     })
     .to_string()
     .into_bytes();
-    let nonce = p.nonce.as_deref().filter(|n| valid_nonce(n)).unwrap_or("");
-    let sig = s
-        .signer
-        .sign(nonce, p.direct_ip.as_deref().unwrap_or(""), &body);
+    let challenge = p.nonce.as_deref().filter(|n| valid_nonce(n)).unwrap_or("");
+    let sig = s.signer.sign(challenge, direct_raw.unwrap_or(""), &body);
     let mut res = ([(CONTENT_TYPE, "application/json")], body).into_response();
     let h = res.headers_mut();
     if let (Ok(sig), Ok(id)) = (
@@ -720,7 +722,7 @@ mod api_tests {
     #[tokio::test]
     async fn dynamic_endpoints_are_no_store_and_nosniff() {
         for path in [
-            "/ip", "/headers", "/geo", "/type", "/judge", "/healthz", "/readyz", "/metrics",
+            "/ip", "/headers", "/geo", "/type", "/judge", "/key", "/healthz", "/readyz", "/metrics",
         ] {
             let res = test_app().oneshot(get_with(path, &[])).await.unwrap();
             assert_eq!(res.status(), StatusCode::OK, "{path}");
@@ -899,6 +901,124 @@ mod api_tests {
             let moved = crate::sign::message("abcdefgh12", "2.2.2.2", &body);
             assert!(vk.verify(&moved, &sig).is_err());
         }
+    }
+
+    /// The key from `cfg`, and the signature and body of the answer at `path`.
+    async fn signed_answer(
+        cfg: &Config,
+        path: &str,
+    ) -> (
+        ed25519_dalek::VerifyingKey,
+        ed25519_dalek::Signature,
+        Vec<u8>,
+    ) {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+
+        let public: [u8; 32] = STANDARD
+            .decode(&cfg.signer.public_key)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let res = test_app_with(cfg)
+            .oneshot(get_with(path, &[]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{path}");
+        let sig = STANDARD
+            .decode(res.headers()["x-judge-signature"].as_bytes())
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        (
+            ed25519_dalek::VerifyingKey::from_bytes(&public).unwrap(),
+            ed25519_dalek::Signature::from_slice(&sig).unwrap(),
+            body.to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn line_feed_in_direct_ip_cannot_move_bytes_into_the_body() {
+        use crate::sign::message;
+        use ed25519_dalek::Verifier;
+
+        let cfg = test_config(1_000_000, Duration::ZERO);
+        let (vk, sig, body) =
+            signed_answer(&cfg, "/judge?direct_ip=1.1.1.1%0Aforged&nonce=abcdefgh12").await;
+
+        // What a proxy would present: its prefix as part of the body, checked
+        // against the direct_ip the client really sent.
+        let forged = [b"forged\n".as_slice(), &body].concat();
+        assert!(
+            vk.verify(&message("abcdefgh12", "1.1.1.1", &forged), &sig)
+                .is_err()
+        );
+        assert!(
+            vk.verify(&message("abcdefgh12", "1.1.1.1", &body), &sig)
+                .is_err()
+        );
+        // The value counted as absent.
+        assert!(vk.verify(&message("abcdefgh12", "", &body), &sig).is_ok());
+    }
+
+    #[tokio::test]
+    async fn line_feed_in_direct_ip_counts_as_absent_for_the_verdict() {
+        let leak = [
+            ("x-forwarded-for", "1.1.1.1"),
+            ("x-forwarded-for", "9.9.9.9"),
+        ];
+        let verdict = |path: &'static str| json(test_app(), get_with(path, &leak));
+        assert_eq!(
+            verdict("/judge?direct_ip=1.1.1.1").await["anonymity"],
+            "transparent"
+        );
+        // Otherwise a proxy could inject a direct_ip the client never sent and
+        // change the verdict while the signature still verifies.
+        assert_eq!(
+            verdict("/judge?direct_ip=1.1.1.1%0A").await["anonymity"],
+            verdict("/judge").await["anonymity"]
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_values_and_invalid_nonce_sign_as_empty() {
+        use crate::sign::message;
+        use ed25519_dalek::Verifier;
+
+        let cfg = test_config(1_000_000, Duration::ZERO);
+        for path in ["/judge", "/judge?nonce=short"] {
+            let (vk, sig, body) = signed_answer(&cfg, path).await;
+            assert!(vk.verify(&message("", "", &body), &sig).is_ok(), "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn other_direct_ip_forms_stay_bound_to_the_signature() {
+        use crate::sign::message;
+        use ed25519_dalek::Verifier;
+
+        let cfg = test_config(1_000_000, Duration::ZERO);
+        // Only a line feed counts as absent: a carriage return is signed as
+        // received, so it fails for a client that sent the clean value.
+        let (vk, sig, body) =
+            signed_answer(&cfg, "/judge?direct_ip=1.1.1.1%0D&nonce=abcdefgh12").await;
+        assert!(
+            vk.verify(&message("abcdefgh12", "1.1.1.1", &body), &sig)
+                .is_err()
+        );
+        assert!(
+            vk.verify(&message("abcdefgh12", "1.1.1.1\r", &body), &sig)
+                .is_ok()
+        );
+
+        // A duplicate is rejected before anything is signed.
+        let res = test_app_with(&cfg)
+            .oneshot(get_with(
+                "/judge?direct_ip=1.1.1.1&direct_ip=2.2.2.2&nonce=abcdefgh12",
+                &[],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(res.headers().get("x-judge-signature").is_none());
     }
 
     #[tokio::test]

@@ -35,6 +35,13 @@ get /judge
 grep -q '"anonymity"' "$TMP/body" || fail "/judge: missing anonymity"
 grep -q '"content_sha256"' "$TMP/body" || fail "/judge: missing content_sha256"
 
+get /key
+grep -q '"public_key"' "$TMP/body" || fail "/key: missing public_key"
+
+curl -fsS -D "$TMP/headers" -o /dev/null "$BASE/judge?nonce=smoke-nonce"   || fail "/judge: request failed"
+grep -qi '^x-judge-signature: ' "$TMP/headers" || fail "/judge: signature missing"
+grep -qi '^x-judge-key-id: ' "$TMP/headers" || fail "/judge: key id missing"
+
 AUTH=()
 if [ -n "${SMOKE_METRICS_TOKEN:-}" ]; then
   AUTH=(-H "Authorization: Bearer $SMOKE_METRICS_TOKEN")

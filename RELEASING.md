@@ -79,6 +79,9 @@ with Linux binaries.
      `CF-Connecting-IP`. nginx: use `nginx.conf.example`; if it adds
      `X-Real-IP`/`Via`, list them in `EDGE_HEADERS`.
    - Public instances: set `METRICS_TOKEN` (or block `/metrics` at the edge).
+     `SIGNING_KEY` is optional; those that answer plain HTTP can set it so that
+     a restart does not disturb checks in progress until ProxPulse fetches the
+     key again by itself.
    - Render: deploy the new image reference. The service needs
      `TRUST_PROXY=1` and `TRUST_CF=1`; `render.yaml` sets them, the image does
      not.

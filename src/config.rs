@@ -56,10 +56,7 @@ impl Config {
                 .unwrap_or(6000),
             edge_headers,
             metrics_token: var("METRICS_TOKEN").filter(|t| !t.trim().is_empty()),
-            signer: match var("SIGNING_KEY").filter(|k| !k.trim().is_empty()) {
-                Some(seed) => Signer::from_seed_b64(&seed)?,
-                None => Signer::generate()?,
-            },
+            signer: parse_signer(env::var("SIGNING_KEY"))?,
         })
     }
 }
@@ -136,9 +133,38 @@ pub fn parse_rdns_timeout(raw: Option<&str>) -> Duration {
         .unwrap_or(Duration::from_secs_f64(1.5))
 }
 
+/// `SIGNING_KEY`: a fixed key, or a generated one when unset or blank. A value
+/// that is not Unicode stops startup instead of silently counting as unset.
+pub fn parse_signer(raw: Result<String, env::VarError>) -> Result<Signer, String> {
+    match raw {
+        Ok(seed) if !seed.trim().is_empty() => Signer::from_seed_b64(&seed),
+        Ok(_) | Err(env::VarError::NotPresent) => Signer::generate(),
+        Err(env::VarError::NotUnicode(_)) => Err("SIGNING_KEY is not valid Unicode".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signing_key_is_fixed_generated_or_rejected() {
+        let seed = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".to_string();
+        let fixed = parse_signer(Ok(seed)).unwrap();
+        assert!(!fixed.ephemeral);
+        assert_eq!(fixed.key_id, "56475aa7");
+
+        for unset in [
+            Err(env::VarError::NotPresent),
+            Ok(String::new()),
+            Ok("   ".to_string()),
+        ] {
+            assert!(parse_signer(unset).unwrap().ephemeral);
+        }
+
+        assert!(parse_signer(Ok("not base64!".to_string())).is_err());
+        assert!(parse_signer(Err(env::VarError::NotUnicode("x".into()))).is_err());
+    }
 
     #[test]
     fn rdns_timeout_parsing_is_panic_free() {

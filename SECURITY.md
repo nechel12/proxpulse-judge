@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest `main` (0.5.x) on a best-effort
+Security fixes are provided for the latest `main` (0.6.x) on a best-effort
 basis. Older commits and deployments are not supported.
 
 ## Reporting a vulnerability
@@ -30,7 +30,8 @@ asking the maintainer for a private channel without disclosing details.
 
 In scope:
 
-- HTTP and header parsing, anonymity verdicts, rate limiting, IP/geo handling.
+- HTTP and header parsing, anonymity verdicts, answer signing and key handling,
+  rate limiting, IP/geo handling.
 - Dockerfiles, entrypoint, database download scripts, and CI workflows.
 - The public source code and published container images.
 
@@ -46,12 +47,14 @@ Out of scope:
 
 ## Security model
 
-The judge does not authenticate clients and has no secrets. It is designed to
-run behind a TLS-terminating reverse proxy with its HTTP port bound to
-loopback. Trust in `X-Forwarded-For` / `CF-Connecting-IP` must match the actual
-topology; a misconfigured trusted header lets clients spoof the reported
-IP/geo and the rate-limit key. Verdicts are heuristics, not a security
-boundary.
+The judge does not authenticate clients. Its secrets are the key that signs
+`/judge` answers and `METRICS_TOKEN`, when set. It is designed to run behind a
+TLS-terminating reverse proxy with its HTTP port bound to loopback. Trust in
+`X-Forwarded-For` / `CF-Connecting-IP` must match the actual topology; a
+misconfigured trusted header lets clients spoof the reported IP/geo and the
+rate-limit key. Verdicts are heuristics, not a security boundary. A signature
+proves an answer came from the judge only as far as the client can trust the
+key it fetched; see "Signed answers" in the README.
 
 ## Safe harbor
 

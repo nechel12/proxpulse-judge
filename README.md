@@ -334,7 +334,7 @@ flowchart TD
 ```
 
 Without `direct_ip` a leak cannot be told apart from an ordinary forwarded
-address, so the result is at most `anonymous`. `ip_type` is `mobile`,
+address, so the result is never worse than `anonymous`. `ip_type` is `mobile`,
 `datacenter`, `business`, `residential`, or `unknown`, derived from the ASN
 organization (and the PTR record when the organization is unknown);
 `type_signals` lists the keywords that matched.
@@ -357,8 +357,8 @@ organization (and the PTR record when the organization is unknown);
 
 Anonymity can only be judged over plain HTTP: inside an HTTPS tunnel the
 proxy cannot add headers. Over HTTP it could also rewrite the answer, for
-example to claim `elite`. So every `/judge` answer carries an Ed25519
-signature in `X-Judge-Signature` (base64) and the key id in
+example to claim `elite`. So every successful (`200`) `/judge` answer carries
+an Ed25519 signature in `X-Judge-Signature` (base64) and the key id in
 `X-Judge-Key-Id`. The signed message is
 
 ```text
@@ -366,24 +366,47 @@ proxpulse-judge-v1\n<nonce>\n<direct_ip>\n<response body>
 ```
 
 with the `nonce` (8–64 characters of `A-Z a-z 0-9 _ -`, otherwise ignored)
-and `direct_ip` query values as received; absent values are empty. The
-checker sends a random nonce with every request and fetches `/key` directly,
-not through a proxy, so a rewritten or replayed answer fails verification.
+and `direct_ip` query values after URL decoding; absent values are empty, and a
+`direct_ip` containing a line feed counts as absent. ProxPulse sends a random
+nonce for every checked proxy and fetches `/key` directly, not through a proxy,
+so the checked proxy cannot swap the key, and an answer it rewrites or replays
+fails verification.
+
+Signatures matter only where `/judge` answers plain HTTP. Render and the Caddy
+and nginx examples redirect HTTP to HTTPS, which hides the request from the
+judge, so ProxPulse's combined HTTPS + HTTP mode gets no anonymity verdict from
+them. Its HTTP-only mode follows the redirect and currently reports the verdict
+from the HTTPS answer, usually a false `elite` whose signature still verifies.
+For anonymity, `/judge` needs a plain-HTTP listener, with HTTPS kept for `/key`.
+
+The key is only as trustworthy as the channel that delivered it. Over HTTPS,
+TLS authenticates it. Over plain HTTP, a direct request only keeps out a checked
+proxy that is not also on the direct path: anyone on that path (local network,
+ISP, VPN) can substitute the key and forge answers, and a client that falls back
+from HTTPS to HTTP can be forced onto it. Serve `/key` over HTTPS, and pin a
+fixed key in the client when that is not enough. ProxPulse currently falls back
+to HTTP and does not pin the key. If `/key` cannot be fetched, ProxPulse treats
+the judge as unsigned for that run and does not detect a rewritten answer.
 
 By default the key is generated at startup and kept only in memory, so it
-changes on every restart. That is enough: trust in the key comes from that
-direct `/key` request, not from the key staying the same. A checker that sees
-an unfamiliar `X-Judge-Key-Id` (the judge restarted mid-check) should fetch
-`/key` again. Set `SIGNING_KEY` to keep one key across restarts, and always
-when several replicas sit behind one address, since each would otherwise sign
-with its own key:
+changes on every restart. A client should fetch `/key` for every run and, after
+a failed verification, fetch it once more and verify again, because the judge
+may have restarted. It should not act on `X-Judge-Key-Id` alone: the header is
+not signed and the proxy controls it. ProxPulse does not retry yet, so a restart
+during a run marks the rest of that run as modified and drops its anonymity
+verdicts.
+
+Set `SIGNING_KEY` to keep one key across restarts or to pin it, and always when
+several replicas sit behind one address, since each would otherwise sign with
+its own key:
 
 ```sh
 openssl rand -base64 32   # any 32 random bytes: put the output in SIGNING_KEY
 ```
 
 The public key is derived from it. Keep the seed secret; a new seed changes
-the key, and checkers pick it up at their next check.
+the key. Clients that fetch `/key` pick it up at their next run; a client that
+pinned the key must be updated.
 
 ## Public instances
 
@@ -524,10 +547,10 @@ limits; metrics are process-local and reset on restart.
 |---|---|
 | Every check is `anonymous`, even an elite proxy | A reverse proxy on the deployment side adds `X-Real-IP`, `Via`, or `Forwarded` (typical for nginx). Such headers are removed from the proxy configuration or listed in `EDGE_HEADERS`. `GET /headers` directly shows what reaches the judge. |
 | A direct check (no proxy) is `transparent`, and `/ip` shows `127.0.0.1` or `172.x` | The judge is behind a reverse proxy with `TRUST_PROXY=0`: `TRUST_PROXY=1` is required. |
-| A proxy known to leak is reported `elite` behind Caddy | Caddy drops the incoming `X-Forwarded-For`: `trusted_proxies` is required, as in `Caddyfile.example`. |
+| A proxy known to leak is reported `elite` behind Caddy | Caddy drops the incoming `X-Forwarded-For`: `trusted_proxies` is required, as in `Caddyfile.example`. `/judge` must also be reached over plain HTTP, see [Signed answers](#signed-answers). |
 | `/ip` shows a Cloudflare address (`172.64.x`, `162.158.x`, …) | Traffic comes through Cloudflare but `TRUST_CF=0`: `TRUST_CF=1` and `TRUST_PROXY=1` are required. |
 | Geo fields are empty with `"error": "no db"`; `/readyz` has `"geo_ready": false` | No `.mmdb` in `./geo`. The fix is to run `bash scripts/download-dbip.sh` and restart the container. |
-| The container exits with `invalid configuration` | A misspelled `TRUST_*` value, an invalid `BIND_ADDR`, or `x-forwarded-for` in `EDGE_HEADERS`; the log names the variable. |
+| The container exits with `invalid configuration` | A misspelled `TRUST_*` value, an invalid `BIND_ADDR`, `x-forwarded-for` in `EDGE_HEADERS`, or a malformed `SIGNING_KEY`; the log names the variable. |
 | `/metrics` returns `401` | `METRICS_TOKEN` is set: the request must include `Authorization: Bearer <token>`. |
 | Render: the first request after a pause times out | The free plan sleeps after 15 minutes; a retry after about a minute resolves it. |
 
