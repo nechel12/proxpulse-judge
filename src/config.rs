@@ -33,11 +33,16 @@ fn var(name: &str) -> Option<String> {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let trust_proxy = parse_flag("TRUST_PROXY", var("TRUST_PROXY").as_deref())?;
+        Self::from_lookup(|name| env::var(name))
+    }
+
+    fn from_lookup(lookup: impl Fn(&str) -> Result<String, env::VarError>) -> Result<Self, String> {
+        let get = |name: &str| parse_var(name, lookup(name));
+        let trust_proxy = parse_flag("TRUST_PROXY", get("TRUST_PROXY")?.as_deref())?;
         // CF headers are proxy headers too: without TRUST_PROXY the service
         // must resolve the IP from the socket, never from client headers.
-        let trust_cf = trust_proxy && parse_flag("TRUST_CF", var("TRUST_CF").as_deref())?;
-        let mut edge_headers = parse_edge_headers(var("EDGE_HEADERS").as_deref())?;
+        let trust_cf = trust_proxy && parse_flag("TRUST_CF", get("TRUST_CF")?.as_deref())?;
+        let mut edge_headers = parse_edge_headers(get("EDGE_HEADERS")?.as_deref())?;
         if !trust_proxy && !edge_headers.is_empty() {
             tracing::warn!(
                 "EDGE_HEADERS is ignored without TRUST_PROXY=1 (no reverse proxy in front)"
@@ -45,24 +50,24 @@ impl Config {
             edge_headers.clear();
         }
         Ok(Self {
-            port: port(),
-            bind: parse_bind(var("BIND_ADDR").as_deref())?,
-            geo_dir: var("GEO_DIR").unwrap_or_else(|| "/app/geo".to_string()),
+            port: parse_port(get("PORT")?.as_deref()),
+            bind: parse_bind(get("BIND_ADDR")?.as_deref())?,
+            geo_dir: get("GEO_DIR")?.unwrap_or_else(|| "/app/geo".to_string()),
             trust_proxy,
             trust_cf,
-            rdns_timeout: parse_rdns_timeout(var("RDNS_TIMEOUT").as_deref()),
-            rate_per_minute: var("RATE_LIMIT_PER_MINUTE")
+            rdns_timeout: parse_rdns_timeout(get("RDNS_TIMEOUT")?.as_deref()),
+            rate_per_minute: get("RATE_LIMIT_PER_MINUTE")?
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(6000),
             edge_headers,
-            metrics_token: var("METRICS_TOKEN").filter(|t| !t.trim().is_empty()),
-            signer: parse_signer(env::var("SIGNING_KEY"))?,
+            metrics_token: get("METRICS_TOKEN")?.filter(|t| !t.trim().is_empty()),
+            signer: parse_signer(get("SIGNING_KEY")?.as_deref())?,
         })
     }
 }
 
-fn port() -> u16 {
-    var("PORT").and_then(|v| v.parse().ok()).unwrap_or(8000)
+fn parse_port(raw: Option<&str>) -> u16 {
+    raw.and_then(|v| v.parse().ok()).unwrap_or(8000)
 }
 
 /// Where `--healthcheck` connects: loopback for a wildcard bind, otherwise
@@ -73,7 +78,7 @@ pub fn probe_addr() -> Option<SocketAddr> {
         IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
         ip => ip,
     };
-    Some(SocketAddr::new(ip, port()))
+    Some(SocketAddr::new(ip, parse_port(var("PORT").as_deref())))
 }
 
 /// `1/true/yes/on` or `0/false/no/off` (any case); unset or empty is off.
@@ -133,13 +138,22 @@ pub fn parse_rdns_timeout(raw: Option<&str>) -> Duration {
         .unwrap_or(Duration::from_secs_f64(1.5))
 }
 
-/// `SIGNING_KEY`: a fixed key, or a generated one when unset or blank. A value
-/// that is not Unicode stops startup instead of silently counting as unset.
-pub fn parse_signer(raw: Result<String, env::VarError>) -> Result<Signer, String> {
+/// `SIGNING_KEY`: a fixed key, or a generated one when unset or blank.
+pub fn parse_signer(raw: Option<&str>) -> Result<Signer, String> {
     match raw {
-        Ok(seed) if !seed.trim().is_empty() => Signer::from_seed_b64(&seed),
-        Ok(_) | Err(env::VarError::NotPresent) => Signer::generate(),
-        Err(env::VarError::NotUnicode(_)) => Err("SIGNING_KEY is not valid Unicode".to_string()),
+        Some(seed) if !seed.trim().is_empty() => Signer::from_seed_b64(seed),
+        _ => Signer::generate(),
+    }
+}
+
+/// A variable's value at startup. One that is not Unicode stops startup instead
+/// of silently counting as unset, which would leave `/metrics` open when it is
+/// `METRICS_TOKEN`.
+fn parse_var(name: &str, raw: Result<String, env::VarError>) -> Result<Option<String>, String> {
+    match raw {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid Unicode")),
     }
 }
 
@@ -149,21 +163,65 @@ mod tests {
 
     #[test]
     fn signing_key_is_fixed_generated_or_rejected() {
-        let seed = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".to_string();
-        let fixed = parse_signer(Ok(seed)).unwrap();
+        let fixed = parse_signer(Some("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")).unwrap();
         assert!(!fixed.ephemeral);
         assert_eq!(fixed.key_id, "56475aa7");
 
-        for unset in [
-            Err(env::VarError::NotPresent),
-            Ok(String::new()),
-            Ok("   ".to_string()),
-        ] {
+        for unset in [None, Some(""), Some("   ")] {
             assert!(parse_signer(unset).unwrap().ephemeral);
         }
 
-        assert!(parse_signer(Ok("not base64!".to_string())).is_err());
-        assert!(parse_signer(Err(env::VarError::NotUnicode("x".into()))).is_err());
+        assert!(parse_signer(Some("not base64!")).is_err());
+    }
+
+    #[test]
+    fn a_variable_that_is_not_unicode_is_an_error() {
+        let parse = |raw| parse_var("METRICS_TOKEN", raw);
+        assert_eq!(parse(Ok("t".to_string())), Ok(Some("t".to_string())));
+        assert_eq!(parse(Err(env::VarError::NotPresent)), Ok(None));
+        let err = parse(Err(env::VarError::NotUnicode("secret".into()))).unwrap_err();
+        assert_eq!(err, "METRICS_TOKEN is not valid Unicode");
+    }
+
+    #[test]
+    fn no_setting_that_is_not_unicode_passes_as_unset() {
+        for name in [
+            "TRUST_PROXY",
+            "TRUST_CF",
+            "EDGE_HEADERS",
+            "PORT",
+            "BIND_ADDR",
+            "GEO_DIR",
+            "RDNS_TIMEOUT",
+            "RATE_LIMIT_PER_MINUTE",
+            "METRICS_TOKEN",
+            "SIGNING_KEY",
+        ] {
+            let err = Config::from_lookup(|var| {
+                if var == name {
+                    Err(env::VarError::NotUnicode("secret".into()))
+                } else if var == "TRUST_PROXY" {
+                    // TRUST_CF is only read behind a reverse proxy.
+                    Ok("1".to_string())
+                } else {
+                    Err(env::VarError::NotPresent)
+                }
+            })
+            .err();
+            assert_eq!(
+                err.as_deref(),
+                Some(format!("{name} is not valid Unicode").as_str())
+            );
+        }
+    }
+
+    #[test]
+    fn unset_settings_take_their_defaults() {
+        let cfg = Config::from_lookup(|_| Err(env::VarError::NotPresent)).unwrap();
+        assert_eq!(cfg.port, 8000);
+        assert!(!cfg.trust_proxy && !cfg.trust_cf);
+        assert!(cfg.metrics_token.is_none());
+        assert!(cfg.signer.ephemeral);
     }
 
     #[test]

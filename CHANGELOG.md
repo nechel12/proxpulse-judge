@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Security
+
+- A setting that is not valid Unicode now stops startup, except `RUST_LOG`.
+  Before, it counted as unset, so such a `METRICS_TOKEN` left `/metrics` open.
+
 ## [0.6.1] — 2026-11-07
 
 ### Security
