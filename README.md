@@ -265,8 +265,8 @@ passthrough and `/healthz` as the health check are required.
 | GET | `/geo` | `{"ip", "geo", "source", "attribution"}` — country/city/ASN from local DBs |
 | GET | `/type` | `{"ip", "ip_type", "signals"}` — IP type with reasoning |
 | GET | `/content` | fixed bytes — integrity reference |
-| GET | `/judge?direct_ip=...&nonce=...` | everything at once + `anonymity`, `content_sha256`; signed when `SIGNING_KEY` is set |
-| GET | `/key` | `{"alg", "key_id", "public_key"}` — the signing key; `404` when signing is off |
+| GET | `/judge?direct_ip=...&nonce=...` | everything at once + `anonymity`, `content_sha256`; signed, see [Signed answers](#signed-answers) |
+| GET | `/key` | `{"alg", "key_id", "public_key"}` — the public key that signs `/judge` |
 | GET | `/healthz` | `{"ok": true}` — liveness probe |
 | GET | `/readyz` | `{"ok", "geo_ready", "geo_sources"}` — readiness |
 | GET | `/metrics` | Prometheus text counters (optionally behind `METRICS_TOKEN`) |
@@ -357,8 +357,8 @@ organization (and the PTR record when the organization is unknown);
 
 Anonymity can only be judged over plain HTTP: inside an HTTPS tunnel the
 proxy cannot add headers. Over HTTP it could also rewrite the answer, for
-example to claim `elite`. With `SIGNING_KEY` set, every `/judge` answer gets
-an Ed25519 signature in `X-Judge-Signature` (base64) and the key id in
+example to claim `elite`. So every `/judge` answer carries an Ed25519
+signature in `X-Judge-Signature` (base64) and the key id in
 `X-Judge-Key-Id`. The signed message is
 
 ```text
@@ -370,13 +370,20 @@ and `direct_ip` query values as received; absent values are empty. The
 checker sends a random nonce with every request and fetches `/key` directly,
 not through a proxy, so a rewritten or replayed answer fails verification.
 
+By default the key is generated at startup and kept only in memory, so it
+changes on every restart. That is enough: trust in the key comes from that
+direct `/key` request, not from the key staying the same. A checker that sees
+an unfamiliar `X-Judge-Key-Id` (the judge restarted mid-check) should fetch
+`/key` again. Set `SIGNING_KEY` to keep one key across restarts, and always
+when several replicas sit behind one address, since each would otherwise sign
+with its own key:
+
 ```sh
 openssl rand -base64 32   # any 32 random bytes: put the output in SIGNING_KEY
 ```
 
-The public key is derived from it and served at `/key`. Keep the seed
-secret; a new seed changes the key, and checkers pick it up at their next
-check.
+The public key is derived from it. Keep the seed secret; a new seed changes
+the key, and checkers pick it up at their next check.
 
 ## Public instances
 
@@ -480,7 +487,7 @@ For running without Docker with logs in a file — example
 | `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, seconds; clamped to 0–60, invalid values fall back to 1.5 |
 | `RATE_LIMIT_PER_MINUTE` | `6000` | token-bucket burst and sustained requests per client per minute (an IPv4 address or an IPv6 `/64`), `0` — no limit |
 | `METRICS_TOKEN` | empty | when set, `/metrics` requires `Authorization: Bearer <token>`; send it over HTTPS only |
-| `SIGNING_KEY` | empty | 32 bytes in base64 (`openssl rand -base64 32`): signs `/judge` answers, see [Signed answers](#signed-answers); a malformed key stops startup |
+| `SIGNING_KEY` | empty | fixed key for signing `/judge` answers: 32 bytes in base64 (`openssl rand -base64 32`); empty — a key generated at startup, see [Signed answers](#signed-answers); a malformed key stops startup |
 | `RUST_LOG` | `info` | log level |
 
 `TRUST_PROXY` and `TRUST_CF` accept `1`/`0`, `true`/`false`, `yes`/`no`,

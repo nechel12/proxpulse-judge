@@ -117,13 +117,18 @@ async fn main() {
 
     let addr = SocketAddr::new(cfg.bind, cfg.port);
     tracing::info!(
-        "proxpulse-judge v{VERSION} on {addr} (trust_proxy={}, trust_cf={}, rate_per_minute={}, edge_headers={:?}, metrics_token={}, signing_key={})",
+        "proxpulse-judge v{VERSION} on {addr} (trust_proxy={}, trust_cf={}, rate_per_minute={}, edge_headers={:?}, metrics_token={}, signing_key={} {})",
         cfg.trust_proxy,
         cfg.trust_cf,
         cfg.rate_per_minute,
         cfg.edge_headers,
         cfg.metrics_token.is_some(),
-        cfg.signer.as_ref().map_or("off", |s| s.key_id.as_str()),
+        cfg.signer.key_id,
+        if cfg.signer.ephemeral {
+            "(generated, changes on restart)"
+        } else {
+            "(SIGNING_KEY)"
+        },
     );
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,

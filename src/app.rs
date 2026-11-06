@@ -49,7 +49,7 @@ pub struct AppState {
     pub rdns_timeout: Duration,
     pub edge_headers: Vec<String>,
     pub metrics_token: Option<String>,
-    pub signer: Option<Arc<Signer>>,
+    pub signer: Signer,
 }
 
 impl AppState {
@@ -70,7 +70,7 @@ impl AppState {
             rdns_timeout: cfg.rdns_timeout,
             edge_headers: cfg.edge_headers.clone(),
             metrics_token: cfg.metrics_token.clone(),
-            signer: cfg.signer.clone().map(Arc::new),
+            signer: cfg.signer.clone(),
         }
     }
 }
@@ -485,21 +485,13 @@ async fn content() -> impl IntoResponse {
     ([(CONTENT_TYPE, "application/json")], logic::FIXED_CONTENT)
 }
 
-/// Public key for /judge signatures; 404 when signing is off.
-async fn key(State(s): State<Arc<AppState>>) -> Response {
-    match &s.signer {
-        Some(signer) => Json(serde_json::json!({
-            "alg": "ed25519",
-            "key_id": signer.key_id,
-            "public_key": signer.public_key,
-        }))
-        .into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "signing is not enabled" })),
-        )
-            .into_response(),
-    }
+/// Public key for /judge signatures.
+async fn key(State(s): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "alg": "ed25519",
+        "key_id": s.signer.key_id,
+        "public_key": s.signer.public_key,
+    }))
 }
 
 async fn judge(
@@ -534,18 +526,18 @@ async fn judge(
     })
     .to_string()
     .into_bytes();
-    let signature = s.signer.as_ref().map(|signer| {
-        let nonce = p.nonce.as_deref().filter(|n| valid_nonce(n)).unwrap_or("");
-        let sig = signer.sign(nonce, p.direct_ip.as_deref().unwrap_or(""), &body);
-        (sig, signer.key_id.clone())
-    });
+    let nonce = p.nonce.as_deref().filter(|n| valid_nonce(n)).unwrap_or("");
+    let sig = s
+        .signer
+        .sign(nonce, p.direct_ip.as_deref().unwrap_or(""), &body);
     let mut res = ([(CONTENT_TYPE, "application/json")], body).into_response();
-    if let Some((sig, key_id)) = signature {
-        let h = res.headers_mut();
-        if let (Ok(sig), Ok(id)) = (HeaderValue::from_str(&sig), HeaderValue::from_str(&key_id)) {
-            h.insert("x-judge-signature", sig);
-            h.insert("x-judge-key-id", id);
-        }
+    let h = res.headers_mut();
+    if let (Ok(sig), Ok(id)) = (
+        HeaderValue::from_str(&sig),
+        HeaderValue::from_str(&s.signer.key_id),
+    ) {
+        h.insert("x-judge-signature", sig);
+        h.insert("x-judge-key-id", id);
     }
     res
 }
@@ -613,7 +605,7 @@ mod api_tests {
             rate_per_minute: per_minute,
             edge_headers: vec![],
             metrics_token: None,
-            signer: None,
+            signer: crate::sign::Signer::generate().unwrap(),
         }
     }
 
@@ -870,49 +862,43 @@ mod api_tests {
         use base64::{Engine, engine::general_purpose::STANDARD};
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-        // Without a key: no signature headers and no /key.
-        let res = test_app()
-            .oneshot(get_with("/judge?direct_ip=1.1.1.1&nonce=abcdefgh12", &[]))
-            .await
-            .unwrap();
-        assert!(res.headers().get("x-judge-signature").is_none());
-        let res = test_app().oneshot(get_with("/key", &[])).await.unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
-
-        let mut cfg = test_config(1_000_000, Duration::ZERO);
-        cfg.signer = Some(
+        // Without SIGNING_KEY (a generated key) and with one: both sign.
+        let generated = test_config(1_000_000, Duration::ZERO);
+        let mut configured = test_config(1_000_000, Duration::ZERO);
+        configured.signer =
             crate::sign::Signer::from_seed_b64("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
-                .unwrap(),
-        );
-        let key = json(test_app_with(&cfg), get_with("/key", &[])).await;
-        assert_eq!(key["alg"], "ed25519");
-        let public: [u8; 32] = STANDARD
-            .decode(key["public_key"].as_str().unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap();
-        let vk = VerifyingKey::from_bytes(&public).unwrap();
+                .unwrap();
+        for cfg in [generated, configured] {
+            let key = json(test_app_with(&cfg), get_with("/key", &[])).await;
+            assert_eq!(key["alg"], "ed25519");
+            let public: [u8; 32] = STANDARD
+                .decode(key["public_key"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let vk = VerifyingKey::from_bytes(&public).unwrap();
 
-        let res = test_app_with(&cfg)
-            .oneshot(get_with("/judge?direct_ip=1.1.1.1&nonce=abcdefgh12", &[]))
-            .await
-            .unwrap();
-        assert_eq!(
-            res.headers()["x-judge-key-id"],
-            key["key_id"].as_str().unwrap()
-        );
-        let sig = STANDARD
-            .decode(res.headers()["x-judge-signature"].as_bytes())
-            .unwrap();
-        let sig = Signature::from_slice(&sig).unwrap();
-        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
-        let ok = crate::sign::message("abcdefgh12", "1.1.1.1", &body);
-        assert!(vk.verify(&ok, &sig).is_ok());
-        // Another nonce or direct_ip does not verify: no replay, no rewrite.
-        let replay = crate::sign::message("otherNonce1", "1.1.1.1", &body);
-        assert!(vk.verify(&replay, &sig).is_err());
-        let moved = crate::sign::message("abcdefgh12", "2.2.2.2", &body);
-        assert!(vk.verify(&moved, &sig).is_err());
+            let res = test_app_with(&cfg)
+                .oneshot(get_with("/judge?direct_ip=1.1.1.1&nonce=abcdefgh12", &[]))
+                .await
+                .unwrap();
+            assert_eq!(
+                res.headers()["x-judge-key-id"],
+                key["key_id"].as_str().unwrap()
+            );
+            let sig = STANDARD
+                .decode(res.headers()["x-judge-signature"].as_bytes())
+                .unwrap();
+            let sig = Signature::from_slice(&sig).unwrap();
+            let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+            let ok = crate::sign::message("abcdefgh12", "1.1.1.1", &body);
+            assert!(vk.verify(&ok, &sig).is_ok());
+            // Another nonce or direct_ip does not verify: no replay, no rewrite.
+            let replay = crate::sign::message("otherNonce1", "1.1.1.1", &body);
+            assert!(vk.verify(&replay, &sig).is_err());
+            let moved = crate::sign::message("abcdefgh12", "2.2.2.2", &body);
+            assert!(vk.verify(&moved, &sig).is_err());
+        }
     }
 
     #[tokio::test]

@@ -723,6 +723,7 @@ dependencies = [
  "base64",
  "dns-lookup",
  "ed25519-dalek",
+ "getrandom 0.4.3",
  "hyper",
  "hyper-util",
  "maxminddb",

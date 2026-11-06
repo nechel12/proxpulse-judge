@@ -4,6 +4,11 @@
 //! anonymity test needs) but could also rewrite the answer. The signature
 //! covers the body together with the checker's `nonce` and `direct_ip`, so
 //! a rewritten or replayed answer fails verification in the checker.
+//!
+//! Without `SIGNING_KEY` the key is generated at startup and lives only in
+//! memory. That is enough because checkers fetch `/key` directly (not through
+//! a proxy) at the start of every check; a fixed key is needed only to share
+//! it between replicas or keep it across restarts.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signer as _, SigningKey};
@@ -19,6 +24,9 @@ pub struct Signer {
     pub public_key: String,
     /// Short id of the public key, sent with every signature.
     pub key_id: String,
+    /// Generated at startup rather than read from `SIGNING_KEY`, so it
+    /// changes on every restart.
+    pub ephemeral: bool,
 }
 
 impl std::fmt::Debug for Signer {
@@ -26,6 +34,7 @@ impl std::fmt::Debug for Signer {
         // Never print the private key.
         f.debug_struct("Signer")
             .field("key_id", &self.key_id)
+            .field("ephemeral", &self.ephemeral)
             .finish()
     }
 }
@@ -40,15 +49,28 @@ impl Signer {
         let seed: [u8; 32] = bytes
             .try_into()
             .map_err(|_| "SIGNING_KEY must be 32 bytes (openssl rand -base64 32)".to_string())?;
-        let key = SigningKey::from_bytes(&seed);
+        Ok(Self::from_seed(&seed, false))
+    }
+
+    /// A fresh key from the OS random generator, used when `SIGNING_KEY`
+    /// is not set.
+    pub fn generate() -> Result<Self, String> {
+        let mut seed = [0u8; 32];
+        getrandom::fill(&mut seed).map_err(|e| format!("cannot generate a signing key: {e}"))?;
+        Ok(Self::from_seed(&seed, true))
+    }
+
+    fn from_seed(seed: &[u8; 32], ephemeral: bool) -> Self {
+        let key = SigningKey::from_bytes(seed);
         let public = key.verifying_key().to_bytes();
         let digest = Sha256::digest(public);
         let key_id = digest[..4].iter().map(|b| format!("{b:02x}")).collect();
-        Ok(Self {
+        Self {
             key,
             public_key: STANDARD.encode(public),
             key_id,
-        })
+            ephemeral,
+        }
     }
 
     /// Base64 signature of [`message`].
@@ -123,6 +145,25 @@ mod tests {
             "bKJP4sGEk2X3TrUbVqV0thXJWq21c5/D/Dg+mP3Tv+BJ6mbj7nJ5r9oOUXwFITETF1oT8/78dJSUh32a964eAA=="
         );
         assert_eq!(s.public_key, "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=");
+        assert!(!s.ephemeral);
+    }
+
+    #[test]
+    fn generated_keys_are_fresh_and_sign() {
+        let a = Signer::generate().unwrap();
+        let b = Signer::generate().unwrap();
+        assert!(a.ephemeral && b.ephemeral);
+        assert_ne!(a.public_key, b.public_key);
+        assert_ne!(a.key_id, b.key_id);
+
+        let sig = a.sign("nonce1234", "1.2.3.4", b"{}");
+        let public: [u8; 32] = STANDARD.decode(&a.public_key).unwrap().try_into().unwrap();
+        let vk = VerifyingKey::from_bytes(&public).unwrap();
+        let sig = Signature::from_slice(&STANDARD.decode(sig).unwrap()).unwrap();
+        assert!(
+            vk.verify(&message("nonce1234", "1.2.3.4", b"{}"), &sig)
+                .is_ok()
+        );
     }
 
     #[test]

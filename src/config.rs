@@ -22,8 +22,9 @@ pub struct Config {
     pub edge_headers: Vec<String>,
     /// Bearer token required by `/metrics`; open when unset.
     pub metrics_token: Option<String>,
-    /// Signs /judge answers when `SIGNING_KEY` is set.
-    pub signer: Option<Signer>,
+    /// Signs /judge answers: the `SIGNING_KEY` seed, or a key generated at
+    /// startup when it is not set.
+    pub signer: Signer,
 }
 
 fn var(name: &str) -> Option<String> {
@@ -55,10 +56,10 @@ impl Config {
                 .unwrap_or(6000),
             edge_headers,
             metrics_token: var("METRICS_TOKEN").filter(|t| !t.trim().is_empty()),
-            signer: var("SIGNING_KEY")
-                .filter(|k| !k.trim().is_empty())
-                .map(|k| Signer::from_seed_b64(&k))
-                .transpose()?,
+            signer: match var("SIGNING_KEY").filter(|k| !k.trim().is_empty()) {
+                Some(seed) => Signer::from_seed_b64(&seed)?,
+                None => Signer::generate()?,
+            },
         })
     }
 }
