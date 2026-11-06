@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Security
+
+- Base image updated to a Debian 13 build with `apt` 3.0.4 (CVE-2026-109518).
+
 ### Added
 
 - Signed answers: `/judge` answers carry an Ed25519 signature over the body,
