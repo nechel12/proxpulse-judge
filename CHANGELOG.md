@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-07
+
 ### Security
 
 - Base image updated to a Debian 13 build with `apt` 3.0.4 (CVE-2026-109518).
@@ -201,7 +203,8 @@
 
 See the git history for 0.5.2 and earlier.
 
-[Unreleased]: https://github.com/nechel12/proxpulse-judge/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/nechel12/proxpulse-judge/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/nechel12/proxpulse-judge/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/nechel12/proxpulse-judge/compare/v0.5.6...v0.6.0
 [0.5.6]: https://github.com/nechel12/proxpulse-judge/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/nechel12/proxpulse-judge/compare/v0.5.4...v0.5.5

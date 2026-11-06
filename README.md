@@ -374,10 +374,10 @@ fails verification.
 
 Signatures matter only where `/judge` answers plain HTTP. Render and the Caddy
 and nginx examples redirect HTTP to HTTPS, which hides the request from the
-judge, so ProxPulse's combined HTTPS + HTTP mode gets no anonymity verdict from
-them. Its HTTP-only mode follows the redirect and currently reports the verdict
-from the HTTPS answer, usually a false `elite` whose signature still verifies.
-For anonymity, `/judge` needs a plain-HTTP listener, with HTTPS kept for `/key`.
+judge, so ProxPulse gets no anonymity verdict from them. (Before 0.6.1 its
+HTTP-only mode reported one from the HTTPS answer, usually a false `elite` whose
+signature still verified.) For anonymity, `/judge` needs a plain-HTTP listener,
+with HTTPS kept for `/key`.
 
 The key is only as trustworthy as the channel that delivered it. Over HTTPS,
 TLS authenticates it. Over plain HTTP, a direct request only keeps out a checked
@@ -385,16 +385,18 @@ proxy that is not also on the direct path: anyone on that path (local network,
 ISP, VPN) can substitute the key and forge answers, and a client that falls back
 from HTTPS to HTTP can be forced onto it. Serve `/key` over HTTPS, and pin a
 fixed key in the client when that is not enough. ProxPulse currently falls back
-to HTTP and does not pin the key. If `/key` cannot be fetched, ProxPulse treats
-the judge as unsigned for that run and does not detect a rewritten answer.
+to HTTP and does not pin the key. From 0.6.1 on, when `/key` gets no clear answer
+it reports no integrity result rather than `ok`. A `404` means an unsigned judge,
+whose answers it only compares by content hash, which does not detect a rewritten
+verdict.
 
 By default the key is generated at startup and kept only in memory, so it
 changes on every restart. A client should fetch `/key` for every run and, after
 a failed verification, fetch it once more and verify again, because the judge
 may have restarted. It should not act on `X-Judge-Key-Id` alone: the header is
-not signed and the proxy controls it. ProxPulse does not retry yet, so a restart
-during a run marks the rest of that run as modified and drops its anonymity
-verdicts.
+not signed and the proxy controls it. ProxPulse does this once per run from 0.6.1
+on; in older versions a restart during a run marks the rest of that run as
+modified and drops its anonymity verdicts.
 
 Set `SIGNING_KEY` to keep one key across restarts or to pin it, and always when
 several replicas sit behind one address, since each would otherwise sign with
