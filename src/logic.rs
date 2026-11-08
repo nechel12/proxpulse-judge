@@ -3,6 +3,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::net::IpAddr;
 
 /// Fixed tamper-check content. Never change bytes without bumping
 /// [`CONTENT_VERSION`], otherwise checkers comparing against an old
@@ -85,10 +86,15 @@ pub fn clean_host(s: &str) -> String {
 /// trims, unwraps `[v6]:port` / `v4:port`, validates, canonicalizes
 /// IPv4-mapped IPv6 (`::ffff:a.b.c.d` → `a.b.c.d`), and re-prints it.
 pub fn normalize_host(s: &str) -> Option<String> {
+    parse_host(s).map(|ip| ip.to_string())
+}
+
+/// The address in a header value, canonical, as [`normalize_host`] reads it.
+pub fn parse_host(s: &str) -> Option<IpAddr> {
     clean_host(s)
-        .parse::<std::net::IpAddr>()
+        .parse::<IpAddr>()
         .ok()
-        .map(|ip| ip.to_canonical().to_string())
+        .map(|ip| ip.to_canonical())
 }
 
 fn is_ipv4_char(c: char) -> bool {
@@ -180,6 +186,25 @@ fn percent_decoded(text: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
+/// Where the client address was read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientFrom {
+    /// `CF-Connecting-IP`, written by the CDN in front of our edge.
+    Cdn,
+    /// The last `X-Forwarded-For` entry, appended by our reverse proxy.
+    Edge,
+    /// The TCP peer.
+    Socket,
+}
+
+/// The resolved client: the proxy's exit address when checked via a proxy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Client {
+    /// Canonical: an IPv4-mapped IPv6 address is the IPv4 one.
+    pub ip: IpAddr,
+    pub from: ClientFrom,
+}
+
 /// Resolve the real client IP (= proxy exit IP when checked via proxy).
 ///
 /// Priority: `CF-Connecting-IP` (set by Cloudflare edge, single IP,
@@ -189,27 +214,31 @@ fn percent_decoded(text: &str) -> Option<String> {
 pub fn client_ip(
     cf_ip: Option<&str>,
     xff: Option<&str>,
-    socket_ip: &str,
+    socket_ip: IpAddr,
     trust_proxy: bool,
     trust_cf: bool,
-) -> String {
+) -> Client {
     // Config already clears trust_cf without trust_proxy; checked here too,
     // since a CF header without a reverse proxy in front is the client's own.
     if trust_proxy
         && trust_cf
-        && let Some(cf) = cf_ip.and_then(normalize_host)
+        && let Some(ip) = cf_ip.and_then(parse_host)
     {
-        return cf;
+        return Client {
+            ip,
+            from: ClientFrom::Cdn,
+        };
     }
-    if trust_proxy {
-        let chain = split_xff(xff);
-        if let Some(last) = chain.last()
-            && let Some(ip) = normalize_host(last)
-        {
-            return ip;
-        }
+    if trust_proxy && let Some(ip) = split_xff(xff).last().and_then(|last| parse_host(last)) {
+        return Client {
+            ip,
+            from: ClientFrom::Edge,
+        };
     }
-    normalize_host(socket_ip).unwrap_or_else(|| socket_ip.to_string())
+    Client {
+        ip: socket_ip.to_canonical(),
+        from: ClientFrom::Socket,
+    }
 }
 
 /// XFF entries added BEFORE our reverse proxy (i.e. by the checked proxy).
@@ -220,49 +249,36 @@ pub fn client_ip(
 /// - CDN in front of the edge (Cloudflare in front of Render, or in front
 ///   of Caddy): the CDN writes the client and the hops below it append
 ///   their own addresses after it (live Render shape:
-///   `[client, CF-egress, inner-LB]`), so everything from the first client
-///   entry onward is our infrastructure — truncate there. The CDN branch
-///   only fires when the client was actually resolved from a valid
-///   `CF-Connecting-IP`, otherwise the single pop applies.
+///   `[client, CF-egress, inner-LB]`), so everything from the CDN's client
+///   entry onward is our infrastructure — truncate there. This applies only
+///   when [`client_ip`] took the client from a valid `CF-Connecting-IP`.
+/// - socket client (`TRUST_PROXY=0`, or no usable entry): nothing of the
+///   chain is ours.
 ///
 /// Either way only the copy our side added goes: a proxy that wrote its own
 /// exit address into XFF still reveals itself, behind Caddy and Cloudflare
 /// alike. The result keeps non-IP placeholders such as Squid's `unknown`.
-pub fn pre_edge_xff(
-    xff: Option<&str>,
-    client: &str,
-    trust_proxy: bool,
-    trust_cf: bool,
-    cf_ip: Option<&str>,
-) -> Vec<String> {
+/// `client` must come from [`client_ip`] for the same `xff`; an entry is
+/// removed only when it is the client's address, so a mismatch fails closed.
+pub fn pre_edge_xff(xff: Option<&str>, client: Client) -> Vec<String> {
     let mut raw = split_xff(xff);
-    if !trust_proxy {
-        return raw;
-    }
-    let client = normalize_host(client).unwrap_or_else(|| client.to_string());
-    // CDN branch: same condition as the CF priority in [`client_ip`]; the
-    // equality guard keeps this fail-closed if a caller ever passes an
-    // inconsistent client.
-    let cdn_client = if trust_cf {
-        cf_ip.and_then(normalize_host)
-    } else {
-        None
-    };
-    if cdn_client.as_deref() == Some(client.as_str()) {
+    let is_client = |e: &String| parse_host(e) == Some(client.ip);
+    match client.from {
+        ClientFrom::Socket => {}
+        ClientFrom::Edge => {
+            if raw.last().is_some_and(is_client) {
+                raw.pop();
+            }
+        }
         // The CDN appends the client address to the proxy-supplied chain,
         // so the *last* occurrence marks where our infrastructure begins.
         // The first occurrence may be a value the checked proxy prepended
         // itself, and truncating there would hide leaks after it.
-        if let Some(pos) = raw
-            .iter()
-            .rposition(|e| normalize_host(e).as_deref() == Some(client.as_str()))
-        {
-            raw.truncate(pos);
+        ClientFrom::Cdn => {
+            if let Some(pos) = raw.iter().rposition(is_client) {
+                raw.truncate(pos);
+            }
         }
-        return raw;
-    }
-    if raw.last().and_then(|s| normalize_host(s)).as_deref() == Some(client.as_str()) {
-        raw.pop();
     }
     raw
 }
@@ -331,6 +347,9 @@ const TELLTALE_HEADERS: &[&str] = &[
     "xroxy-connection",
 ];
 
+/// A header our own side adds is never a telltale. The lists do not overlap
+/// today (`infra_headers_are_never_telltales`); the check keeps it so when
+/// either list grows.
 fn is_telltale(name: &str, trust_proxy: bool, trust_cf: bool) -> bool {
     if is_infra(name, trust_proxy, trust_cf) {
         return false;
@@ -470,7 +489,7 @@ fn hits(text: &str, keywords: &[&str]) -> Vec<String> {
         .collect()
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Default, Serialize)]
 pub struct TypeSignals {
     pub org: Option<String>,
     pub rdns: Option<String>,
@@ -486,7 +505,7 @@ pub struct TypeSignals {
 /// Heuristic IP type. Local data can't prove residential-vs-business
 /// the way paid ASN DBs do — `TypeSignals` exposes WHY, so callers
 /// (and humans) can judge.
-pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (String, TypeSignals) {
+pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (&'static str, TypeSignals) {
     let hay_org = org.unwrap_or("").to_string();
     let hay_all = format!("{} {}", hay_org, rdns.unwrap_or(""));
     // A PTR name like vps42.hosting.example says hosting too, but "host"
@@ -539,31 +558,34 @@ pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (String, TypeSignal
     };
     if google_fiber {
         signals.note = Some("google fiber: residential ISP".to_string());
-        return ("residential".to_string(), signals);
+        return ("residential", signals);
     }
     if !signals.mobile_kw.is_empty() {
-        return ("mobile".to_string(), signals);
+        return ("mobile", signals);
     }
     if !signals.hosting_kw.is_empty() || !signals.hosting_vendor.is_empty() {
-        return ("datacenter".to_string(), signals);
+        return ("datacenter", signals);
     }
     if !signals.business_kw.is_empty() {
-        return ("business".to_string(), signals);
+        return ("business", signals);
     }
     if !signals.residential_kw.is_empty() {
-        return ("residential".to_string(), signals);
+        return ("residential", signals);
     }
     if !hay_org.trim().is_empty() {
         signals.note = Some("default: ordinary ISP".to_string());
-        return ("residential".to_string(), signals);
+        return ("residential", signals);
     }
-    ("unknown".to_string(), signals)
+    ("unknown", signals)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The chain as a request with these headers gets it. `client` is the
+    /// address the test expects to be resolved: the socket when nothing is
+    /// trusted, otherwise a header's (the socket is then our own edge).
     fn forwarded_chain(
         xff: Option<&str>,
         client: &str,
@@ -571,7 +593,37 @@ mod tests {
         trust_cf: bool,
         cf_ip: Option<&str>,
     ) -> Vec<String> {
-        normalize_chain(&pre_edge_xff(xff, client, trust_proxy, trust_cf, cf_ip))
+        let edge = IpAddr::from([10, 0, 0, 1]);
+        let socket = if trust_proxy {
+            edge
+        } else {
+            parse_host(client).unwrap_or(edge)
+        };
+        let resolved = client_ip(cf_ip, xff, socket, trust_proxy, trust_cf);
+        assert_eq!(Some(resolved.ip), parse_host(client), "resolved client");
+        let from = if !trust_proxy {
+            ClientFrom::Socket
+        } else if trust_cf && cf_ip.and_then(parse_host).is_some() {
+            ClientFrom::Cdn
+        } else {
+            ClientFrom::Edge
+        };
+        assert_eq!(resolved.from, from, "client source");
+        normalize_chain(&pre_edge_xff(xff, resolved))
+    }
+
+    /// [`client_ip`] for a socket address given as text, as text.
+    fn resolve(
+        cf_ip: Option<&str>,
+        xff: Option<&str>,
+        socket: &str,
+        trust_proxy: bool,
+        trust_cf: bool,
+    ) -> String {
+        let socket = socket.parse().unwrap();
+        client_ip(cf_ip, xff, socket, trust_proxy, trust_cf)
+            .ip
+            .to_string()
     }
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -579,6 +631,18 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn infra_headers_are_never_telltales() {
+        // Without the is_infra guard: the lists themselves must not overlap.
+        for name in INFRA_HEADERS.iter().chain(CF_INFRA_HEADERS) {
+            assert!(!TELLTALE_HEADERS.contains(name), "{name}");
+            assert!(
+                !name.starts_with("proxy-") && !name.starts_with("x-proxy"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -596,11 +660,11 @@ mod tests {
 
     #[test]
     fn client_ip_resolution() {
-        assert_eq!(client_ip(None, None, "9.9.9.9", false, true), "9.9.9.9");
-        assert_eq!(client_ip(None, None, "9.9.9.9", true, true), "9.9.9.9");
+        assert_eq!(resolve(None, None, "9.9.9.9", false, true), "9.9.9.9");
+        assert_eq!(resolve(None, None, "9.9.9.9", true, true), "9.9.9.9");
         // proxy forwarded 1.2.3.4, Caddy appended exit 5.6.7.8
         assert_eq!(
-            client_ip(None, Some("1.2.3.4, 5.6.7.8"), "10.0.0.1", true, true),
+            resolve(None, Some("1.2.3.4, 5.6.7.8"), "10.0.0.1", true, true),
             "5.6.7.8"
         );
     }
@@ -609,7 +673,7 @@ mod tests {
     fn client_ip_prefers_cf_header() {
         // Cloudflare edge: real exit in CF-Connecting-IP, socket is the tunnel
         assert_eq!(
-            client_ip(
+            resolve(
                 Some("5.6.7.8"),
                 Some("9.9.9.9, 5.6.7.8"),
                 "172.21.0.1",
@@ -620,7 +684,7 @@ mod tests {
         );
         // garbage CF value is ignored, XFF fallback still works
         assert_eq!(
-            client_ip(
+            resolve(
                 Some("not-an-ip"),
                 Some("9.9.9.9, 5.6.7.8"),
                 "172.21.0.1",
@@ -631,7 +695,7 @@ mod tests {
         );
         // trust_cf off → CF header ignored
         assert_eq!(
-            client_ip(Some("5.6.7.8"), None, "172.21.0.1", false, false),
+            resolve(Some("5.6.7.8"), None, "172.21.0.1", false, false),
             "172.21.0.1"
         );
     }
@@ -698,12 +762,21 @@ mod tests {
             )
             .is_empty()
         );
-        // Inconsistent caller input (client not from CF header):
-        // fail closed, legacy single pop applies.
-        assert_eq!(
-            forwarded_chain(Some("9.9.9.9"), "1.1.1.1", true, true, Some("9.9.9.9")),
-            vec!["9.9.9.9"]
-        );
+        // A client that is not what the headers resolve to: fail closed,
+        // nothing is removed, from either side.
+        for from in [ClientFrom::Cdn, ClientFrom::Edge] {
+            let other = Client {
+                ip: IpAddr::from([1, 1, 1, 1]),
+                from,
+            };
+            assert_eq!(pre_edge_xff(Some("9.9.9.9"), other), vec!["9.9.9.9"]);
+        }
+        // Without a trusted hop the whole chain is the client's.
+        let socket = Client {
+            ip: IpAddr::from([9, 9, 9, 9]),
+            from: ClientFrom::Socket,
+        };
+        assert_eq!(pre_edge_xff(Some("1.2.3.4, 9.9.9.9"), socket).len(), 2);
     }
 
     #[test]
@@ -896,7 +969,7 @@ mod tests {
             "transparent"
         );
         assert_eq!(
-            client_ip(Some("1.1.1.1"), None, "9.9.9.9", false, true),
+            resolve(Some("1.1.1.1"), None, "9.9.9.9", false, true),
             "9.9.9.9"
         );
     }
@@ -1157,7 +1230,7 @@ mod tests {
         assert_eq!(clean_host("2001:db8::1"), "2001:db8::1");
         // sloppy proxy appends source port: exit still resolves, chain strips
         assert_eq!(
-            client_ip(None, Some("9.9.9.9:40000, 5.6.7.8"), "x", true, true),
+            resolve(None, Some("9.9.9.9:40000, 5.6.7.8"), "10.0.0.1", true, true),
             "5.6.7.8"
         );
         assert_eq!(
@@ -1169,16 +1242,16 @@ mod tests {
     #[test]
     fn client_ip_rejects_garbage_xff() {
         assert_eq!(
-            client_ip(None, Some("not-an-ip"), "9.9.9.9", true, true),
+            resolve(None, Some("not-an-ip"), "9.9.9.9", true, true),
             "9.9.9.9"
         );
         assert_eq!(
-            client_ip(None, Some("1.2.3.4:80, garbage"), "9.9.9.9", true, true),
+            resolve(None, Some("1.2.3.4:80, garbage"), "9.9.9.9", true, true),
             "9.9.9.9"
         );
         // a valid address with a source port still resolves
         assert_eq!(
-            client_ip(None, Some("1.2.3.4:80"), "9.9.9.9", true, true),
+            resolve(None, Some("1.2.3.4:80"), "9.9.9.9", true, true),
             "1.2.3.4"
         );
     }
@@ -1270,8 +1343,13 @@ mod tests {
 
     #[test]
     fn trailing_garbage_xff_does_not_pop_earlier_client_hop() {
+        // The last entry is no address, so the client is the socket, which
+        // happens to equal an earlier entry: that entry is the proxy's.
+        let xff = Some("9.9.9.9, garbage");
+        let client = client_ip(None, xff, IpAddr::from([9, 9, 9, 9]), true, false);
+        assert_eq!(client.from, ClientFrom::Socket);
         assert_eq!(
-            forwarded_chain(Some("9.9.9.9, garbage"), "9.9.9.9", true, false, None),
+            normalize_chain(&pre_edge_xff(xff, client)),
             vec!["9.9.9.9".to_string()]
         );
     }

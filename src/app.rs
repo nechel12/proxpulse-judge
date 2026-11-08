@@ -22,9 +22,10 @@ use std::{
 use tokio::sync::Semaphore;
 
 use crate::config::Config;
-use crate::geo::{GeoInfo, GeoPool};
+use crate::geo::{self, GeoInfo, GeoPool};
 use crate::logic::{
-    self, anonymity_level, classify_ip, client_ip, normalize_chain, normalize_host, pre_edge_xff,
+    self, Client, anonymity_level, classify_ip, client_ip, normalize_chain, normalize_host,
+    pre_edge_xff,
 };
 use crate::metrics::{Metrics, inc};
 use crate::ratelimit::RateLimit;
@@ -38,8 +39,8 @@ const RDNS_MAX_CONCURRENT: usize = 16;
 
 pub struct AppState {
     pub geo: GeoPool,
-    pub geo_cache: Cache<String, GeoInfo>,
-    pub ptr_cache: Cache<String, Option<String>>,
+    pub geo_cache: Cache<IpAddr, GeoInfo>,
+    pub ptr_cache: Cache<IpAddr, Option<String>>,
     pub rdns_sem: Arc<Semaphore>,
     pub rate_limit: RateLimit,
     pub metrics: Metrics,
@@ -89,7 +90,7 @@ async fn rate_limit_mw(
 ) -> Response {
     if !is_monitoring(req.uri().path()) {
         let client = self_ip(&s, req.headers(), conn);
-        if let Some(secs) = s.rate_limit.check(&client) {
+        if let Some(secs) = s.rate_limit.check(client.ip) {
             inc(&s.metrics.rate_limited);
             return (
                 StatusCode::TOO_MANY_REQUESTS,
@@ -222,13 +223,13 @@ fn headers_lower(headers: &HeaderMap) -> HashMap<String, String> {
 
 /// The client address. The server always attaches the socket address; a
 /// stand-in would have put every client into one rate-limit bucket.
-fn self_ip(s: &AppState, headers: &HeaderMap, conn: SocketAddr) -> String {
+fn self_ip(s: &AppState, headers: &HeaderMap, conn: SocketAddr) -> Client {
     let cf = joined_header(headers, "cf-connecting-ip");
     let xff = joined_header(headers, "x-forwarded-for");
     client_ip(
         cf.as_deref(),
         xff.as_deref(),
-        &conn.ip().to_string(),
+        conn.ip(),
         s.trust_proxy,
         s.trust_cf,
     )
@@ -241,16 +242,10 @@ fn self_ip(s: &AppState, headers: &HeaderMap, conn: SocketAddr) -> String {
 fn proxy_view(
     s: &AppState,
     headers: &HeaderMap,
-    me: &str,
+    me: Client,
 ) -> (HashMap<String, String>, Vec<String>) {
     let mut view = headers_lower(headers);
-    let pre_edge = pre_edge_xff(
-        view.get("x-forwarded-for").map(String::as_str),
-        me,
-        s.trust_proxy,
-        s.trust_cf,
-        view.get("cf-connecting-ip").map(String::as_str),
-    );
+    let pre_edge = pre_edge_xff(view.get("x-forwarded-for").map(String::as_str), me);
     let chain = normalize_chain(&pre_edge);
     if s.trust_proxy {
         view.retain(|name, _| !s.edge_headers.contains(name));
@@ -263,10 +258,8 @@ fn proxy_view(
     (view, chain)
 }
 
-fn geo_cached(state: &AppState, ip: &str) -> GeoInfo {
-    state
-        .geo_cache
-        .get_with(ip.to_string(), || state.geo.lookup(ip))
+fn geo_cached(state: &AppState, ip: IpAddr) -> GeoInfo {
+    state.geo_cache.get_with(ip, || state.geo.lookup(ip))
 }
 
 fn is_public_ip(addr: IpAddr) -> bool {
@@ -314,15 +307,15 @@ fn is_public_ip(addr: IpAddr) -> bool {
 /// unicast IPs, at most RDNS_MAX_CONCURRENT resolutions at once, results
 /// cached for an hour. The client cannot request rDNS — there is no such
 /// parameter.
-async fn maybe_rdns(state: &AppState, ip: &str, aso: Option<&str>) -> Option<String> {
+async fn maybe_rdns(state: &AppState, addr: IpAddr, aso: Option<&str>) -> Option<String> {
     if state.rdns_timeout.is_zero() || aso.is_some_and(|o| !o.trim().is_empty()) {
         return None;
     }
-    let addr = ip.parse::<IpAddr>().ok()?.to_canonical();
+    let addr = addr.to_canonical();
     if !is_public_ip(addr) {
         return None;
     }
-    let key = addr.to_string();
+    let key = addr;
     if let Some(hit) = state.ptr_cache.get(&key) {
         return hit;
     }
@@ -373,12 +366,12 @@ async fn index(State(s): State<Arc<AppState>>) -> impl IntoResponse {
             "dbip_lite": {
                 "license": "CC BY 4.0",
                 "url": "https://db-ip.com/db/lite.php",
-                "attribution": "IP Geolocation by DB-IP (https://db-ip.com)",
+                "attribution": geo::DBIP_ATTRIBUTION,
             },
             "geolite2": {
                 "license": "GeoLite EULA (CC BY-SA 4.0 aspects)",
                 "url": "https://www.maxmind.com/en/geolite/eula",
-                "attribution": "This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com",
+                "attribution": geo::MAXMIND_ATTRIBUTION,
             },
         },
         "endpoints": [
@@ -450,7 +443,7 @@ async fn ip(
     conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    Json(serde_json::json!({ "ip": self_ip(&s, &headers, conn.0) }))
+    Json(serde_json::json!({ "ip": self_ip(&s, &headers, conn.0).ip }))
 }
 
 async fn headers_echo(
@@ -459,8 +452,8 @@ async fn headers_echo(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     let me = self_ip(&s, &headers, conn.0);
-    let (view, chain) = proxy_view(&s, &headers, &me);
-    Json(serde_json::json!({ "ip": me, "headers": view, "xff_chain": chain }))
+    let (view, chain) = proxy_view(&s, &headers, me);
+    Json(serde_json::json!({ "ip": me.ip, "headers": view, "xff_chain": chain }))
 }
 
 async fn geo_ep(
@@ -468,8 +461,8 @@ async fn geo_ep(
     conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&s, &headers, conn.0);
-    let data = geo_cached(&s, &me);
+    let me = self_ip(&s, &headers, conn.0).ip;
+    let data = geo_cached(&s, me);
     Json(serde_json::json!({
         "ip": me,
         "geo": data,
@@ -492,9 +485,9 @@ async fn ip_type(
     conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&s, &headers, conn.0);
-    let data = geo_cached(&s, &me);
-    let ptr = maybe_rdns(&s, &me, data.aso.as_deref()).await;
+    let me = self_ip(&s, &headers, conn.0).ip;
+    let data = geo_cached(&s, me);
+    let ptr = maybe_rdns(&s, me, data.aso.as_deref()).await;
     let (t, signals) = classify_ip(data.aso.as_deref(), ptr.as_deref());
     Json(serde_json::json!({ "ip": me, "ip_type": t, "signals": signals }))
 }
@@ -519,7 +512,7 @@ async fn judge(
     Query(p): Query<JudgeParams>,
 ) -> Response {
     let me = self_ip(&s, &headers, conn.0);
-    let (view, chain) = proxy_view(&s, &headers, &me);
+    let (view, chain) = proxy_view(&s, &headers, me);
     // A line feed would move bytes between the signed fields (sign::message),
     // so such a value counts as absent for the verdict and the signature alike.
     let direct_raw = p.direct_ip.as_deref().filter(|d| !d.contains('\n'));
@@ -528,12 +521,12 @@ async fn judge(
     let direct = direct_raw.and_then(normalize_host);
     let level = anonymity_level(&view, direct.as_deref(), s.trust_proxy, s.trust_cf);
 
-    let g = geo_cached(&s, &me);
-    let ptr = maybe_rdns(&s, &me, g.aso.as_deref()).await;
+    let g = geo_cached(&s, me.ip);
+    let ptr = maybe_rdns(&s, me.ip, g.aso.as_deref()).await;
     let (t, signals) = classify_ip(g.aso.as_deref(), ptr.as_deref());
 
     let body = serde_json::json!({
-        "ip": me,
+        "ip": me.ip,
         "headers": view,
         "xff_chain": chain,
         "anonymity": level,
@@ -550,14 +543,16 @@ async fn judge(
     let challenge = p.nonce.as_deref().filter(|n| valid_nonce(n)).unwrap_or("");
     let sig = s.signer.sign(challenge, direct_raw.unwrap_or(""), &body);
     let mut res = ([(CONTENT_TYPE, "application/json")], body).into_response();
+    // Base64 and hex: always valid header values.
     let h = res.headers_mut();
-    if let (Ok(sig), Ok(id)) = (
-        HeaderValue::from_str(&sig),
-        HeaderValue::from_str(&s.signer.key_id),
-    ) {
-        h.insert("x-judge-signature", sig);
-        h.insert("x-judge-key-id", id);
-    }
+    h.insert(
+        "x-judge-signature",
+        HeaderValue::from_str(&sig).expect("base64"),
+    );
+    h.insert(
+        "x-judge-key-id",
+        HeaderValue::from_str(&s.signer.key_id).expect("hex"),
+    );
     res
 }
 
@@ -1227,12 +1222,12 @@ mod api_tests {
             &test_config(1_000_000, Duration::from_millis(50)),
         );
         assert!(
-            maybe_rdns(&state, "8.8.8.8", Some("Google LLC"))
+            maybe_rdns(&state, IpAddr::from([8, 8, 8, 8]), Some("Google LLC"))
                 .await
                 .is_none()
         );
         assert_eq!(state.metrics.rdns_lookups.load(Ordering::Relaxed), 0);
-        assert!(state.ptr_cache.get("8.8.8.8").is_none());
+        assert!(state.ptr_cache.get(&IpAddr::from([8, 8, 8, 8])).is_none());
     }
 
     #[tokio::test]
@@ -1259,7 +1254,8 @@ mod api_tests {
             "3fff::1",
             "64:ff9b::808:808",
         ] {
-            assert!(maybe_rdns(&state, ip, None).await.is_none(), "{ip}");
+            let addr = ip.parse().unwrap();
+            assert!(maybe_rdns(&state, addr, None).await.is_none(), "{ip}");
         }
         assert_eq!(state.metrics.rdns_lookups.load(Ordering::Relaxed), 0);
     }

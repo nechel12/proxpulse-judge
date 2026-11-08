@@ -12,6 +12,10 @@ const CITY_CANDIDATES: &[&str] = &["GeoLite2-City.mmdb", "dbip-city-lite.mmdb"];
 const COUNTRY_CANDIDATES: &[&str] = &["GeoLite2-Country.mmdb", "dbip-country-lite.mmdb"];
 const ASN_CANDIDATES: &[&str] = &["GeoLite2-ASN.mmdb", "dbip-asn-lite.mmdb"];
 
+/// Notices the database licences require wherever their data is shown.
+pub const MAXMIND_ATTRIBUTION: &str = "This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com";
+pub const DBIP_ATTRIBUTION: &str = "IP Geolocation by DB-IP (https://db-ip.com)";
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GeoInfo {
     pub ip: String,
@@ -65,25 +69,20 @@ fn try_open(path: &Path) -> Option<Reader<Vec<u8>>> {
     }
 }
 
-/// The first usable database of one kind, its file name, and the names of
-/// the candidates before it that could not be used.
+/// The first usable database of one `kind` ("city", "country", "asn"), its
+/// file name, and the names of the candidates before it that could not be
+/// used. After the known `names`, any `.mmdb` whose name contains `kind`.
 fn open_first(
     dir: &Path,
     names: &[&str],
+    kind: &str,
 ) -> (Option<Reader<Vec<u8>>>, Option<String>, Vec<String>) {
     let mut candidates: Vec<PathBuf> = names
         .iter()
         .map(|n| dir.join(n))
         .filter(|p| p.exists())
         .collect();
-    // glob fallback: any matching file
-    let pattern = if names[0].contains("City") || names[0].contains("city") {
-        "city"
-    } else if names[0].contains("ASN") || names[0].contains("asn") {
-        "asn"
-    } else {
-        "country"
-    };
+    let pattern = kind;
     if let Ok(entries) = std::fs::read_dir(dir) {
         let mut hits: Vec<PathBuf> = entries
             .filter_map(|e| e.ok().map(|x| x.path()))
@@ -129,10 +128,10 @@ fn open_first(
 
 impl GeoPool {
     pub fn open(dir: &Path) -> Self {
-        let (city, city_src, mut skipped) = open_first(dir, CITY_CANDIDATES);
-        let (country, country_src, more) = open_first(dir, COUNTRY_CANDIDATES);
+        let (city, city_src, mut skipped) = open_first(dir, CITY_CANDIDATES, "city");
+        let (country, country_src, more) = open_first(dir, COUNTRY_CANDIDATES, "country");
         skipped.extend(more);
-        let (asn, asn_src, more) = open_first(dir, ASN_CANDIDATES);
+        let (asn, asn_src, more) = open_first(dir, ASN_CANDIDATES, "asn");
         skipped.extend(more);
         let mut sources = std::collections::HashMap::new();
         if let Some(s) = city_src {
@@ -173,9 +172,9 @@ impl GeoPool {
         }
         for name in labels {
             if name.contains("maxmind") || name.contains("geolite") || name.contains("geoip") {
-                out.push("This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com");
+                out.push(MAXMIND_ATTRIBUTION);
             } else if name.contains("dbip") || name.contains("db-ip") {
-                out.push("IP Geolocation by DB-IP (https://db-ip.com)");
+                out.push(DBIP_ATTRIBUTION);
             }
         }
         out.sort_unstable();
@@ -183,19 +182,10 @@ impl GeoPool {
         out
     }
 
-    pub fn lookup(&self, ip: &str) -> GeoInfo {
-        let addr: IpAddr = match ip.parse::<IpAddr>() {
-            Ok(a) => a.to_canonical(),
-            Err(_) => {
-                return GeoInfo {
-                    ip: ip.to_string(),
-                    error: Some("invalid ip".to_string()),
-                    ..Default::default()
-                };
-            }
-        };
+    pub fn lookup(&self, addr: IpAddr) -> GeoInfo {
+        let addr = addr.to_canonical();
         let mut out = GeoInfo {
-            ip: ip.to_string(),
+            ip: addr.to_string(),
             ..Default::default()
         };
         if let Some(reader) = &self.city {
@@ -295,49 +285,33 @@ fn is_empty_record(v: &Value) -> bool {
     }
 }
 
+/// The value at `path` in a record, as `record["a"]["b"]` would reach it.
+fn at<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter().try_fold(v, |cur, key| cur.get(*key))
+}
+
+// Each getter tries every shape, not just the first path that resolves:
+// e.g. a `country` object without `names.en` still falls through to a flat
+// `country` string or `registered_country`.
+
 fn get_str(v: &Value, paths: &[&[&str]]) -> Option<String> {
-    // Try every shape, not just the first path that resolves: e.g. a
-    // `country` object without `names.en` should still fall through to a
-    // flat `country` string or `registered_country`.
     paths.iter().find_map(|path| {
-        let mut cur = v;
-        for key in *path {
-            cur = cur.get(*key)?;
-        }
-        cur.as_str()
+        at(v, path)?
+            .as_str()
             .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+            .map(str::to_string)
     })
 }
 
 fn get_f64(v: &Value, paths: &[&[&str]]) -> Option<f64> {
-    paths.iter().find_map(|path| {
-        let mut cur = v;
-        for key in *path {
-            cur = cur.get(*key)?;
-        }
-        cur.as_f64().or_else(|| cur.as_i64().map(|n| n as f64))
-    })
+    // as_f64 reads integers too.
+    paths.iter().find_map(|path| at(v, path)?.as_f64())
 }
 
 fn get_u32(v: &Value, paths: &[&[&str]]) -> Option<u32> {
-    paths.iter().find_map(|path| {
-        let mut cur = v;
-        for key in *path {
-            cur = cur.get(*key)?;
-        }
-        if let Some(n) = cur.as_u64()
-            && n <= u32::MAX as u64
-        {
-            return Some(n as u32);
-        }
-        if let Some(n) = cur.as_i64()
-            && (0..=u32::MAX as i64).contains(&n)
-        {
-            return Some(n as u32);
-        }
-        None
-    })
+    paths
+        .iter()
+        .find_map(|path| u32::try_from(at(v, path)?.as_u64()?).ok())
 }
 
 fn apply_city(v: &Value, out: &mut GeoInfo) {
@@ -379,21 +353,8 @@ fn apply_city(v: &Value, out: &mut GeoInfo) {
             ],
         );
     }
-    // some ASN-combined DBs also carry org fields
-    if out.aso.is_none() {
-        out.aso = get_str(
-            v,
-            &[
-                &["autonomous_system_organization"],
-                &["aso"],
-                &["organization"],
-                &["org"],
-            ],
-        );
-    }
-    if out.asn.is_none() {
-        out.asn = get_u32(v, &[&["autonomous_system_number"], &["asn"]]);
-    }
+    // Some combined databases carry the ASN fields as well.
+    apply_asn(v, out);
 }
 
 fn apply_asn(v: &Value, out: &mut GeoInfo) {
@@ -476,15 +437,18 @@ pub(crate) mod test_mmdb {
         }
     }
 
-    /// Write a database whose only network is `network`/24.
-    pub(crate) fn write(path: &Path, database_type: &str, network: [u8; 4], record: &Value) {
+    /// The only network of every test database: 203.0.113.0/24.
+    const NETWORK: [u8; 4] = [203, 0, 113, 0];
+
+    /// Write a database whose only network is [`NETWORK`].
+    pub(crate) fn write(path: &Path, database_type: &str, record: &Value) {
         // One node per prefix bit: the matching branch descends, the other
         // one is the "no data" record (== node_count). The last matching
         // branch points at offset 0 of the data section.
         let node_count = PREFIX_LEN;
         let empty = node_count;
         let data = node_count + 16;
-        let bits = u32::from_be_bytes(network);
+        let bits = u32::from_be_bytes(NETWORK);
         let mut out = Vec::new();
         for depth in 0..PREFIX_LEN {
             let next = if depth + 1 == PREFIX_LEN {
@@ -544,7 +508,6 @@ pub(crate) mod test_mmdb {
         write(
             &dir.join("GeoLite2-City.mmdb"),
             "GeoLite2-City",
-            [203, 0, 113, 0],
             &json!({
                 "city": {"names": {"en": "Frankfurt"}},
                 "country": {"iso_code": "DE", "names": {"en": "Germany"}},
@@ -554,7 +517,6 @@ pub(crate) mod test_mmdb {
         write(
             &dir.join("GeoLite2-ASN.mmdb"),
             "GeoLite2-ASN",
-            [203, 0, 113, 0],
             &json!({
                 "autonomous_system_number": 64500,
                 "autonomous_system_organization": "Example Hosting GmbH",
@@ -592,7 +554,9 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const MAXMIND_ATTRIBUTION: &str = "This product includes GeoLite2 Data created by MaxMind, available from https://www.maxmind.com";
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
 
     #[test]
     fn real_mmdb_files_are_read_and_verified() {
@@ -611,7 +575,7 @@ mod tests {
             .expect("test databases are structurally valid");
         assert_eq!(pool.attributions(), vec![MAXMIND_ATTRIBUTION]);
 
-        let info = pool.lookup("203.0.113.7");
+        let info = pool.lookup(ip("203.0.113.7"));
         assert_eq!(info.error, None);
         assert_eq!(info.country.as_deref(), Some("Germany"));
         assert_eq!(info.country_code.as_deref(), Some("DE"));
@@ -622,15 +586,15 @@ mod tests {
         assert_eq!(info.aso.as_deref(), Some("Example Hosting GmbH"));
 
         // IPv4-mapped IPv6 resolves through the IPv4 tree
-        let mapped = pool.lookup("::ffff:203.0.113.7");
+        let mapped = pool.lookup(ip("::ffff:203.0.113.7"));
         assert_eq!(mapped.country_code.as_deref(), Some("DE"));
         // databases are loaded, the address is simply not covered
         assert_eq!(
-            pool.lookup("198.51.100.1").error.as_deref(),
+            pool.lookup(ip("198.51.100.1")).error.as_deref(),
             Some("not found")
         );
         // IPv6 in IPv4-only databases is a reported error, not a panic
-        assert!(pool.lookup("2001:db8::1").error.is_some());
+        assert!(pool.lookup(ip("2001:db8::1")).error.is_some());
     }
 
     #[test]
@@ -641,12 +605,14 @@ mod tests {
         test_mmdb::write(
             &dir.path().join("GeoLite2-City.mmdb"),
             "GeoLite2-ASN",
-            [203, 0, 113, 0],
             &json!({"autonomous_system_number": 64500}),
         );
         let pool = GeoPool::open(dir.path());
         assert!(pool.sources().is_empty());
-        assert_eq!(pool.lookup("203.0.113.7").error.as_deref(), Some("no db"));
+        assert_eq!(
+            pool.lookup(ip("203.0.113.7")).error.as_deref(),
+            Some("no db")
+        );
         assert!(pool.verify().is_err());
     }
 
@@ -670,7 +636,6 @@ mod tests {
             test_mmdb::write(
                 &dir.path().join(format!("dbip-city-lite-{month}.mmdb")),
                 "DBIP-City-Lite",
-                [203, 0, 113, 0],
                 &json!({"country": {"iso_code": code}}),
             );
         }
@@ -680,7 +645,7 @@ mod tests {
             Some("dbip-city-lite-2026-11.mmdb")
         );
         assert_eq!(
-            pool.lookup("203.0.113.7").country_code.as_deref(),
+            pool.lookup(ip("203.0.113.7")).country_code.as_deref(),
             Some("FR")
         );
     }
@@ -691,33 +656,14 @@ mod tests {
         test_mmdb::write(
             &dir.path().join("dbip-city-lite.mmdb"),
             "DBIP-City-Lite",
-            [203, 0, 113, 0],
             &json!({"country": {"iso_code": "DE"}}),
         );
         let pool = GeoPool::open(dir.path());
+        assert_eq!(pool.attributions(), vec![DBIP_ATTRIBUTION]);
         assert_eq!(
-            pool.attributions(),
-            vec!["IP Geolocation by DB-IP (https://db-ip.com)"]
-        );
-        assert_eq!(
-            pool.lookup("203.0.113.7").country_code.as_deref(),
+            pool.lookup(ip("203.0.113.7")).country_code.as_deref(),
             Some("DE")
         );
-    }
-
-    #[test]
-    fn maxmind_shaped_record() {
-        let v = json!({
-            "city": {"names": {"en": "Frankfurt"}},
-            "country": {"iso_code": "DE", "names": {"en": "Germany"}},
-            "location": {"latitude": 50.1, "longitude": 8.6},
-        });
-        let mut out = GeoInfo::default();
-        apply_city(&v, &mut out);
-        assert_eq!(out.city.as_deref(), Some("Frankfurt"));
-        assert_eq!(out.country_code.as_deref(), Some("DE"));
-        assert_eq!(out.country.as_deref(), Some("Germany"));
-        assert_eq!(out.latitude, Some(50.1));
     }
 
     #[test]
@@ -747,11 +693,9 @@ mod tests {
     }
 
     #[test]
-    fn invalid_ip_without_db() {
+    fn lookup_without_db() {
         let pool = GeoPool::open(Path::new("/nonexistent-dir-xyz"));
-        let info = pool.lookup("not-an-ip");
-        assert_eq!(info.error.as_deref(), Some("invalid ip"));
-        let info2 = pool.lookup("8.8.8.8");
+        let info2 = pool.lookup(ip("8.8.8.8"));
         assert_eq!(info2.error.as_deref(), Some("no db"));
         assert!(pool.verify().is_err());
     }
