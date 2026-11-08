@@ -25,9 +25,11 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// Headers a reverse proxy (Caddy/nginx) adds itself. They must NOT be
-/// treated as proxy telltales, otherwise every check behind a reverse
-/// proxy would look "anonymous".
+/// Headers our own reverse proxy (Caddy/nginx) adds. Behind one
+/// (`TRUST_PROXY=1`) their presence is not blamed on the checked proxy,
+/// otherwise every check would look "anonymous". Without one nothing in
+/// front of the judge adds them, so they mark a proxy like any other
+/// `X-Forwarded-*`.
 const INFRA_HEADERS: &[&str] = &[
     "x-forwarded-proto",
     "x-forwarded-host",
@@ -35,6 +37,8 @@ const INFRA_HEADERS: &[&str] = &[
     "x-forwarded-ssl",
     "x-real-port",
 ];
+/// Headers Cloudflare adds (`TRUST_CF=1`). Their values are the client's own
+/// address, so behind Cloudflare they are neither telltales nor leaks.
 const CF_INFRA_HEADERS: &[&str] = &[
     "cdn-loop",
     "cf-connecting-ip",
@@ -95,36 +99,93 @@ fn is_ipv6_char(c: char) -> bool {
     c.is_ascii_hexdigit() || c == ':' || c == '.'
 }
 
-/// True when `ip` occurs in `text` on character boundaries (so
-/// `1.2.3.4` does not match inside `1.2.3.40`, and `::1` does not
-/// match inside `::10`), including non-canonical IPv6 or IPv4-mapped forms.
+/// True when `ip` occurs in `text` as an address of its own: `1.2.3.4` does
+/// not match inside `1.2.3.40`, nor `::1` inside `::10`. Punctuation after it
+/// (`from 1.2.3.4.`) or a label before it (`ip:2001:db8::1`) does not hide it,
+/// and neither do non-canonical, IPv4-mapped or percent-encoded forms.
 fn ip_in_text(text: &str, ip: &std::net::IpAddr) -> bool {
     let ip = ip.to_canonical();
+    ip_in_plain_text(text, &ip) || percent_decoded(text).is_some_and(|d| ip_in_plain_text(&d, &ip))
+}
+
+fn ip_in_plain_text(text: &str, ip: &std::net::IpAddr) -> bool {
     let needle = ip.to_string().to_ascii_lowercase();
     let haystack = text.to_ascii_lowercase();
-    let boundary: fn(char) -> bool = match ip {
+    let part: fn(char) -> bool = match ip {
         std::net::IpAddr::V4(_) => is_ipv4_char,
         std::net::IpAddr::V6(_) => is_ipv6_char,
     };
+    let v6 = matches!(ip, std::net::IpAddr::V6(_));
     if haystack.match_indices(&needle).any(|(idx, _)| {
-        let before = haystack[..idx].chars().next_back();
-        let after = haystack[idx + needle.len()..].chars().next();
-        !before.map(boundary).unwrap_or(false) && !after.map(boundary).unwrap_or(false)
+        let before = &haystack[..idx];
+        (ends_address(before.chars().rev(), part) || (v6 && after_word_label(before)))
+            && ends_address(haystack[idx + needle.len()..].chars(), part)
     }) {
         return true;
     }
     haystack
         .split(|c: char| !is_ipv6_char(c))
         .filter(|tok| !tok.is_empty())
+        .flat_map(|tok| [tok, tok.trim_matches(|c| c == '.' || c == ':')])
         .filter_map(normalize_host)
         .any(|cand| cand == needle)
+}
+
+/// Whether the characters next to a match, walking away from it, end the
+/// address: no address character, or a lone `.` or `:` that no address
+/// character follows (sentence punctuation, a `key:` label).
+fn ends_address(mut next: impl Iterator<Item = char>, part: fn(char) -> bool) -> bool {
+    match next.next() {
+        None => true,
+        Some(c) if !part(c) => true,
+        Some('.' | ':') => !next.next().is_some_and(part),
+        Some(_) => false,
+    }
+}
+
+/// Whether `before` ends in a word label and its colon (`src:`, `id:`): hex
+/// letters that a letter past `f` precedes are part of a word, not of an
+/// IPv6 address. `cafe:` alone may be an address and does not count.
+fn after_word_label(before: &str) -> bool {
+    let Some(label) = before.strip_suffix(':') else {
+        return false;
+    };
+    label
+        .trim_end_matches(|c: char| c.is_ascii_hexdigit())
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+}
+
+/// `text` with its `%XX` escapes decoded, when it has any.
+fn percent_decoded(text: &str) -> Option<String> {
+    if !text.contains('%') {
+        return None;
+    }
+    let hex = |b: Option<&u8>| b.and_then(|&b| (b as char).to_digit(16));
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let (Some(high), Some(low)) = (hex(bytes.get(i + 1)), hex(bytes.get(i + 2)))
+        {
+            out.push((high * 16 + low) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Resolve the real client IP (= proxy exit IP when checked via proxy).
 ///
 /// Priority: `CF-Connecting-IP` (set by Cloudflare edge, single IP,
-/// only when trust_cf) → last X-Forwarded-For entry (appended by our
-/// own reverse proxy, only when trust_proxy) → socket address.
+/// only with both trust_proxy and trust_cf) → last X-Forwarded-For entry
+/// (appended by our own reverse proxy, only when trust_proxy) → socket
+/// address.
 pub fn client_ip(
     cf_ip: Option<&str>,
     xff: Option<&str>,
@@ -132,7 +193,12 @@ pub fn client_ip(
     trust_proxy: bool,
     trust_cf: bool,
 ) -> String {
-    if trust_cf && let Some(cf) = cf_ip.and_then(normalize_host) {
+    // Config already clears trust_cf without trust_proxy; checked here too,
+    // since a CF header without a reverse proxy in front is the client's own.
+    if trust_proxy
+        && trust_cf
+        && let Some(cf) = cf_ip.and_then(normalize_host)
+    {
         return cf;
     }
     if trust_proxy {
@@ -157,11 +223,11 @@ pub fn client_ip(
 ///   `[client, CF-egress, inner-LB]`), so everything from the first client
 ///   entry onward is our infrastructure — truncate there. The CDN branch
 ///   only fires when the client was actually resolved from a valid
-///   `CF-Connecting-IP`, otherwise the legacy single pop applies and the
-///   Caddy/VPS behaviour is unchanged.
+///   `CF-Connecting-IP`, otherwise the single pop applies.
 ///
-/// Raw XFF tokens added BEFORE our reverse proxy (including non-IP placeholders
-/// such as Squid's `unknown`).
+/// Either way only the copy our side added goes: a proxy that wrote its own
+/// exit address into XFF still reveals itself, behind Caddy and Cloudflare
+/// alike. The result keeps non-IP placeholders such as Squid's `unknown`.
 pub fn pre_edge_xff(
     xff: Option<&str>,
     client: &str,
@@ -193,9 +259,6 @@ pub fn pre_edge_xff(
         {
             raw.truncate(pos);
         }
-        // Drop any remaining copies of the edge/client address (an elite
-        // proxy may have put its own exit into XFF as well).
-        raw.retain(|e| normalize_host(e).as_deref() != Some(client.as_str()));
         return raw;
     }
     if raw.last().and_then(|s| normalize_host(s)).as_deref() == Some(client.as_str()) {
@@ -220,23 +283,53 @@ fn forwarded_chain(
     normalize_chain(&pre_edge_xff(xff, client, trust_proxy, trust_cf, cf_ip))
 }
 
-fn is_infra(name: &str, trust_cf: bool) -> bool {
-    let n = name.to_ascii_lowercase();
-    // Only headers controlled by Cloudflare are infrastructure. Arbitrary
-    // cf-* names can pass through the edge and must still be checked for leaks.
-    INFRA_HEADERS.contains(&n.as_str()) || (trust_cf && CF_INFRA_HEADERS.contains(&n.as_str()))
+/// A (lowercased) header our own side adds: not blamed on the checked proxy.
+/// Only Cloudflare's own names count as Cloudflare's: arbitrary `cf-*` names
+/// pass through its edge.
+fn is_infra(name: &str, trust_proxy: bool, trust_cf: bool) -> bool {
+    trust_proxy && (INFRA_HEADERS.contains(&name) || (trust_cf && CF_INFRA_HEADERS.contains(&name)))
+}
+
+/// Whether a (lowercased) header's value is searched for the client's own
+/// address. Not `Host`, which names the judge, nor our reverse proxy's copy
+/// of it in `X-Forwarded-Host`. Behind Cloudflare, not `CF-Connecting-IP`,
+/// which is the client address by design, nor a `True-Client-IP` that only
+/// repeats it; Cloudflare's other headers never hold the client address, so
+/// a value the proxy put there is still searched.
+fn scanned_for_leaks(
+    name: &str,
+    value: &str,
+    headers: &HashMap<String, String>,
+    trust_proxy: bool,
+    trust_cf: bool,
+) -> bool {
+    let same_as = |other: &str| {
+        headers
+            .get(other)
+            .is_some_and(|o| o.trim().eq_ignore_ascii_case(value.trim()))
+    };
+    match name {
+        "host" => false,
+        "x-forwarded-host" => !(trust_proxy && same_as("host")),
+        "cf-connecting-ip" => !(trust_proxy && trust_cf),
+        "true-client-ip" => !(trust_proxy && trust_cf && same_as("cf-connecting-ip")),
+        _ => true,
+    }
 }
 
 /// Header names that only a proxy on the way adds: their presence alone means
-/// "not elite", whatever their value. Cloudflare's own headers are not here:
-/// a judge behind Cloudflare with `TRUST_CF=0` would then call every proxy
-/// anonymous; their values are still scanned for the client's address.
+/// "not elite", whatever their value. So do every `Proxy-*` and `X-Proxy*`
+/// name and, with nothing in front of the judge, every `X-Forwarded-*` (see
+/// [`is_telltale`]). Cloudflare's own headers are not here: a judge behind
+/// Cloudflare with `TRUST_CF=0` would then call every proxy anonymous; their
+/// values are still scanned for the client's address.
 const TELLTALE_HEADERS: &[&str] = &[
     "via",
     "forwarded",
     "forwarded-for",
     "forwarded-for-ip",
     "x-forwarded",
+    "x-forwarded-for",
     "x-real-ip",
     "client-ip",
     "x-client-ip",
@@ -249,47 +342,46 @@ const TELLTALE_HEADERS: &[&str] = &[
     "xroxy-connection",
 ];
 
-fn is_telltale(name: &str, trust_cf: bool) -> bool {
-    let n = name.to_ascii_lowercase();
-    if is_infra(&n, trust_cf) {
+fn is_telltale(name: &str, trust_proxy: bool, trust_cf: bool) -> bool {
+    if is_infra(name, trust_proxy, trust_cf) {
         return false;
     }
-    TELLTALE_HEADERS.contains(&n.as_str()) || n.starts_with("proxy-") || n.starts_with("x-proxy")
+    // Behind a reverse proxy, edges add X-Forwarded-* names of their own
+    // (Traefik's -Server, ingress-nginx's -Scheme, Envoy's -Client-Cert), so
+    // only the listed ones count there.
+    TELLTALE_HEADERS.contains(&name)
+        || ["proxy-", "x-proxy"].iter().any(|p| name.starts_with(p))
+        || (!trust_proxy && (name.starts_with("x-forwarded") || INFRA_HEADERS.contains(&name)))
 }
 
 /// levels: elite | anonymous | transparent.
 ///
-/// `headers` — lowercased request headers as seen by judge, with the
-/// reverse-proxy-added XFF entries already removed (see
-/// [`pre_edge_xff`]). `direct_ip` — checker's own IP learned via a
-/// direct /ip call; without it only proxy presence can be determined.
+/// `headers` — request headers as seen by judge, with the
+/// reverse-proxy-added XFF entries already removed and `X-Forwarded-For`
+/// dropped when none are left (see [`pre_edge_xff`]). Any `X-Forwarded-For`
+/// left, even an empty one, came from the proxy side. `direct_ip` —
+/// checker's own IP learned via a direct /ip call; without it only proxy
+/// presence can be determined.
 pub fn anonymity_level(
     headers: &HashMap<String, String>,
     direct_ip: Option<&str>,
+    trust_proxy: bool,
     trust_cf: bool,
 ) -> &'static str {
-    let raw_xff = split_xff(headers.get("x-forwarded-for").map(|s| s.as_str()));
-    let chain: Vec<String> = raw_xff.iter().filter_map(|e| normalize_host(e)).collect();
-    let direct: Option<std::net::IpAddr> = direct_ip
+    let lower = |k: &String| k.to_ascii_lowercase();
+    if let Some(d) = direct_ip
         .and_then(normalize_host)
-        .and_then(|d| d.parse().ok());
-
-    if let Some(d) = direct {
-        let d_str = d.to_string();
-        if chain.iter().any(|c| c == &d_str) {
-            return "transparent";
-        }
-        if headers
-            .iter()
-            .any(|(k, v)| k != "x-forwarded-for" && !is_infra(k, trust_cf) && ip_in_text(v, &d))
-        {
-            return "transparent";
-        }
+        .and_then(|d| d.parse::<std::net::IpAddr>().ok())
+        && headers.iter().any(|(k, v)| {
+            scanned_for_leaks(&lower(k), v, headers, trust_proxy, trust_cf) && ip_in_text(v, &d)
+        })
+    {
+        return "transparent";
     }
-    if !chain.is_empty() || !raw_xff.is_empty() {
-        return "anonymous";
-    }
-    if headers.keys().any(|k| is_telltale(k, trust_cf)) {
+    if headers
+        .keys()
+        .any(|k| is_telltale(&lower(k), trust_proxy, trust_cf))
+    {
         return "anonymous";
     }
     "elite"
@@ -615,13 +707,14 @@ mod tests {
             h.get("cf-connecting-ip").map(|s| s.as_str()),
         );
         assert!(chain.is_empty());
+        // As proxy_view does: no entries left, no X-Forwarded-For.
         let mut for_analysis = h.clone();
-        for_analysis.insert("x-forwarded-for".to_string(), chain.join(", "));
+        for_analysis.remove("x-forwarded-for");
         assert_eq!(
-            anonymity_level(&for_analysis, Some("1.1.1.1"), true),
+            anonymity_level(&for_analysis, Some("1.1.1.1"), true, true),
             "elite"
         );
-        assert_eq!(anonymity_level(&for_analysis, None, true), "elite");
+        assert_eq!(anonymity_level(&for_analysis, None, true, true), "elite");
     }
 
     #[test]
@@ -633,19 +726,18 @@ mod tests {
             ("cf-connecting-ip", "1.1.1.1"),
             ("true-client-ip", "1.1.1.1"),
             ("cf-ray", "abc123"),
-            ("x-forwarded-for", ""),
         ]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "elite");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true, true), "elite");
     }
 
     #[test]
     fn elite_direct_behind_caddy() {
         assert_eq!(
-            anonymity_level(&map(&[("x-forwarded-for", "")]), Some("1.1.1.1"), true),
+            anonymity_level(&map(&[]), Some("1.1.1.1"), true, true),
             "elite"
         );
         assert_eq!(
-            anonymity_level(&map(&[("user-agent", "x")]), None, true),
+            anonymity_level(&map(&[("user-agent", "x")]), None, true, true),
             "elite"
         );
     }
@@ -653,26 +745,35 @@ mod tests {
     #[test]
     fn transparent_leak() {
         let h = map(&[("x-forwarded-for", "1.1.1.1"), ("user-agent", "x")]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "transparent");
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, true),
+            "transparent"
+        );
     }
 
     #[test]
     fn multiple_non_direct_hops_are_anonymous() {
         let h = map(&[("x-forwarded-for", "9.9.9.9, 8.8.8.8")]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "anonymous");
-        assert_eq!(anonymity_level(&h, None, true), "anonymous");
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, true),
+            "anonymous"
+        );
+        assert_eq!(anonymity_level(&h, None, true, true), "anonymous");
     }
 
     #[test]
     fn anonymous_forwarded_no_leak() {
         let h = map(&[("x-forwarded-for", "9.9.9.9"), ("user-agent", "x")]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "anonymous");
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, true),
+            "anonymous"
+        );
     }
 
     #[test]
     fn anonymous_via() {
         assert_eq!(
-            anonymity_level(&map(&[("via", "1.0 proxy")]), Some("1.1.1.1"), true),
+            anonymity_level(&map(&[("via", "1.0 proxy")]), Some("1.1.1.1"), true, true),
             "anonymous"
         );
     }
@@ -704,7 +805,7 @@ mod tests {
                 for direct in [Some("1.1.1.1"), None] {
                     let h = map(&[(&name.to_ascii_lowercase(), "9.9.9.9")]);
                     assert_eq!(
-                        anonymity_level(&h, direct, trust_cf),
+                        anonymity_level(&h, direct, true, trust_cf),
                         "anonymous",
                         "{name} trust_cf={trust_cf} direct={direct:?}"
                     );
@@ -713,10 +814,13 @@ mod tests {
         }
         // The same headers carrying the client's own address leak it.
         let h = map(&[("x-client-ip", "1.1.1.1")]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), false), "transparent");
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, false),
+            "transparent"
+        );
         // Cloudflare's headers alone do not mark a proxy (see TELLTALE_HEADERS).
         let h = map(&[("cf-connecting-ip", "9.9.9.9"), ("cf-ray", "x")]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), false), "elite");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true, false), "elite");
     }
 
     #[test]
@@ -724,8 +828,115 @@ mod tests {
         let h = map(&[
             ("x-forwarded-proto", "https"),
             ("x-forwarded-host", "check.x"),
+            ("host", "check.x"),
         ]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "elite");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true, true), "elite");
+    }
+
+    #[test]
+    fn without_a_reverse_proxy_its_headers_mark_the_proxy() {
+        // TRUST_PROXY=0: nothing in front of the judge adds these, so the
+        // checked proxy did.
+        for (name, value) in [
+            ("x-forwarded-proto", "http"),
+            ("x-forwarded-port", "3128"),
+            ("x-forwarded-host", "example.com"),
+            ("x-forwarded-ssl", "off"),
+            ("x-forwarded-server", "squid"),
+            ("x-real-port", "40000"),
+        ] {
+            let h = map(&[(name, value)]);
+            assert_eq!(
+                anonymity_level(&h, Some("1.1.1.1"), false, false),
+                "anonymous",
+                "{name}"
+            );
+            assert_eq!(anonymity_level(&h, None, false, false), "anonymous");
+        }
+        let h = map(&[("x-forwarded-host", "1.1.1.1")]);
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), false, false),
+            "transparent"
+        );
+        // Behind a reverse proxy the value is still searched for a leak.
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, false),
+            "transparent"
+        );
+        // An empty X-Forwarded-For is still a proxy's header.
+        let h = map(&[("x-forwarded-for", "")]);
+        assert_eq!(anonymity_level(&h, None, false, false), "anonymous");
+    }
+
+    #[test]
+    fn cf_headers_count_as_cloudflare_only_behind_a_reverse_proxy() {
+        let h = map(&[("cf-connecting-ip", "1.1.1.1"), ("cf-ray", "x")]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true, true), "elite");
+        // Without TRUST_PROXY there is no Cloudflare in front, whatever
+        // trust_cf says: the value is the client's own.
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), false, true),
+            "transparent"
+        );
+        assert_eq!(
+            client_ip(Some("1.1.1.1"), None, "9.9.9.9", false, true),
+            "9.9.9.9"
+        );
+    }
+
+    #[test]
+    fn leaks_in_loose_notations_are_found() {
+        for (name, value) in [
+            ("x-forwarded-for", "for=1.1.1.1, 5.6.7.8"),
+            ("x-forwarded-for", "\"1.1.1.1\", 5.6.7.8"),
+            ("x-note", "from 1.1.1.1."),
+            ("x-note", "client: 1.1.1.1:"),
+            ("x-note", "seen at host.1.1.1.1"),
+            ("x-note", "1%2E1%2E1%2E1"),
+        ] {
+            let h = map(&[(name, value)]);
+            assert_eq!(
+                anonymity_level(&h, Some("1.1.1.1"), true, true),
+                "transparent",
+                "{name}: {value}"
+            );
+        }
+        for value in [
+            "ip:2001:db8::1",
+            "src:2001:db8::1",
+            "id:2001:db8::1",
+            "2001:db8::1.",
+            "2001%3Adb8%3A%3A1",
+            "[2001%3adb8%3a%3a1]%3a443",
+        ] {
+            let h = map(&[("x-note", value)]);
+            assert_eq!(
+                anonymity_level(&h, Some("2001:db8::1"), true, true),
+                "transparent",
+                "{value}"
+            );
+        }
+        // Still on boundaries: a longer address is not this one.
+        for value in ["1.1.1.10", "11.1.1.1", "1.1.1.1.5", "21.1.1.1."] {
+            let h = map(&[("x-note", value)]);
+            assert_eq!(
+                anonymity_level(&h, Some("1.1.1.1"), true, true),
+                "elite",
+                "{value}"
+            );
+        }
+        let h = map(&[
+            ("x-note", "2001:db8::10"),
+            ("x-other", "a2001:db8::1"),
+            ("x-third", "cafe:2001:db8::1"),
+        ]);
+        assert_eq!(
+            anonymity_level(&h, Some("2001:db8::1"), true, true),
+            "elite"
+        );
+        // Host names the judge, never the client.
+        let h = map(&[("host", "1.1.1.1:8000")]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), false, false), "elite");
     }
 
     #[test]
@@ -737,9 +948,8 @@ mod tests {
             ("cf-ray", "abc123"),
             ("cf-ipcountry", "DE"),
             ("cdn-loop", "cloudflare"),
-            ("x-forwarded-for", ""),
         ]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "elite");
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true, true), "elite");
     }
 
     #[test]
@@ -749,30 +959,98 @@ mod tests {
             ("cf-connecting-ip", "5.6.7.8"),
             ("x-forwarded-for", "1.1.1.1"),
         ]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "transparent");
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, true),
+            "transparent"
+        );
     }
 
     #[test]
     fn true_client_ip_is_a_leak_without_trust_cf() {
-        let h = map(&[("true-client-ip", "1.1.1.1"), ("x-forwarded-for", "")]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), false), "transparent");
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "elite");
+        let h = map(&[("true-client-ip", "1.1.1.1")]);
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, false),
+            "transparent"
+        );
+        // Behind Cloudflare it only repeats CF-Connecting-IP; on its own it
+        // is the proxy's.
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, true),
+            "transparent"
+        );
+        let h = map(&[
+            ("true-client-ip", "1.1.1.1"),
+            ("cf-connecting-ip", "1.1.1.1"),
+        ]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true, true), "elite");
+    }
+
+    #[test]
+    fn cloudflare_headers_that_never_hold_the_client_are_searched() {
+        // CDN-Loop is appended to, never replaced: a proxy's value survives.
+        let h = map(&[
+            ("cf-connecting-ip", "9.9.9.9"),
+            ("cdn-loop", "1.1.1.1, cloudflare; loops=1"),
+        ]);
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, true),
+            "transparent"
+        );
+        let h = map(&[
+            ("cf-connecting-ip", "9.9.9.9"),
+            ("true-client-ip", "1.1.1.1"),
+        ]);
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, true),
+            "transparent"
+        );
+    }
+
+    #[test]
+    fn edge_forwarded_names_do_not_mark_a_proxy_behind_a_reverse_proxy() {
+        // Traefik, ingress-nginx and Envoy add X-Forwarded-* names of their
+        // own: behind a reverse proxy only the listed ones count.
+        for name in [
+            "x-forwarded-server",
+            "x-forwarded-scheme",
+            "x-forwarded-prefix",
+        ] {
+            let h = map(&[(name, "edge-1")]);
+            assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true, false), "elite");
+            assert_eq!(
+                anonymity_level(&h, Some("1.1.1.1"), false, false),
+                "anonymous"
+            );
+        }
+        // Our Caddy copies Host into X-Forwarded-Host: not a leak.
+        let h = map(&[
+            ("host", "1.1.1.1:8000"),
+            ("x-forwarded-host", "1.1.1.1:8000"),
+        ]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true, false), "elite");
+        let h = map(&[("host", "judge.x"), ("x-forwarded-host", "1.1.1.1")]);
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, false),
+            "transparent"
+        );
     }
 
     #[test]
     fn cf_header_is_a_leak_without_trust_cf() {
-        let h = map(&[("cf-connecting-ip", "1.1.1.1"), ("x-forwarded-for", "")]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), false), "transparent");
+        let h = map(&[("cf-connecting-ip", "1.1.1.1")]);
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, false),
+            "transparent"
+        );
     }
 
     #[test]
     fn unknown_cf_header_is_checked_for_leaks() {
-        let h = map(&[
-            ("cf-connecting-ip", "5.6.7.8"),
-            ("cf-custom", "1.1.1.1"),
-            ("x-forwarded-for", ""),
-        ]);
-        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), true), "transparent");
+        let h = map(&[("cf-connecting-ip", "5.6.7.8"), ("cf-custom", "1.1.1.1")]);
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, true),
+            "transparent"
+        );
     }
 
     #[test]
@@ -870,30 +1148,39 @@ mod tests {
     #[test]
     fn prefix_is_not_a_leak() {
         let h = map(&[("x-forwarded-for", "1.2.3.40")]);
-        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "anonymous");
+        assert_eq!(
+            anonymity_level(&h, Some("1.2.3.4"), true, true),
+            "anonymous"
+        );
         let h = map(&[("user-agent", "Mozilla 1.2.3.40")]);
-        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "elite");
+        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true, true), "elite");
     }
 
     #[test]
     fn header_value_exact_ip_is_a_leak() {
         let h = map(&[("referer", "https://x/?ip=1.2.3.4&y=1")]);
-        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "transparent");
+        assert_eq!(
+            anonymity_level(&h, Some("1.2.3.4"), true, true),
+            "transparent"
+        );
     }
 
     #[test]
     fn ipv6_forms_are_normalized() {
         let h = map(&[("x-forwarded-for", "2001:0db8:0:0:0:0:0:1")]);
         assert_eq!(
-            anonymity_level(&h, Some("2001:db8::1"), true),
+            anonymity_level(&h, Some("2001:db8::1"), true, true),
             "transparent"
         );
         let h = map(&[("x-forwarded-for", "2001:db8::10")]);
-        assert_eq!(anonymity_level(&h, Some("2001:db8::1"), true), "anonymous");
+        assert_eq!(
+            anonymity_level(&h, Some("2001:db8::1"), true, true),
+            "anonymous"
+        );
         // Non-canonical IPv6 in non-XFF headers must also be detected as a leak
         let h = map(&[("x-real-ip", "2001:0db8:0:0:0:0:0:1")]);
         assert_eq!(
-            anonymity_level(&h, Some("2001:db8::1"), true),
+            anonymity_level(&h, Some("2001:db8::1"), true, true),
             "transparent"
         );
         let h = map(&[(
@@ -901,7 +1188,7 @@ mod tests {
             "for=\"[2001:0db8:0:0:0:0:0:1]:8080\";proto=http",
         )]);
         assert_eq!(
-            anonymity_level(&h, Some("2001:db8::1"), true),
+            anonymity_level(&h, Some("2001:db8::1"), true, true),
             "transparent"
         );
     }
@@ -917,21 +1204,30 @@ mod tests {
             Some("1.2.3.4".to_string())
         );
         let h = map(&[("x-forwarded-for", "::ffff:1.2.3.4")]);
-        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "transparent");
+        assert_eq!(
+            anonymity_level(&h, Some("1.2.3.4"), true, true),
+            "transparent"
+        );
         let h = map(&[("x-forwarded-for", "1.2.3.4")]);
         assert_eq!(
-            anonymity_level(&h, Some("::ffff:1.2.3.4"), true),
+            anonymity_level(&h, Some("::ffff:1.2.3.4"), true, true),
             "transparent"
         );
         let h = map(&[("x-client-ip", "::ffff:0102:0304")]);
-        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "transparent");
+        assert_eq!(
+            anonymity_level(&h, Some("1.2.3.4"), true, true),
+            "transparent"
+        );
     }
 
     #[test]
     fn unknown_xff_is_anonymous_not_elite() {
         let h = map(&[("x-forwarded-for", "unknown")]);
-        assert_eq!(anonymity_level(&h, Some("1.2.3.4"), true), "anonymous");
-        assert_eq!(anonymity_level(&h, None, true), "anonymous");
+        assert_eq!(
+            anonymity_level(&h, Some("1.2.3.4"), true, true),
+            "anonymous"
+        );
+        assert_eq!(anonymity_level(&h, None, true, true), "anonymous");
     }
 
     #[test]
@@ -955,18 +1251,24 @@ mod tests {
                 true,
                 Some("9.9.9.9"),
             ),
-            vec!["1.2.3.4"]
+            vec!["9.9.9.9", "1.2.3.4"]
         );
-        // Elite proxy: exit only, CF appended it again -> nothing leaks.
-        assert!(
-            forwarded_chain(
-                Some("9.9.9.9, 9.9.9.9, 172.71.146.141, 10.29.121.232"),
-                "9.9.9.9",
-                true,
-                true,
-                Some("9.9.9.9"),
-            )
-            .is_empty()
+        // A proxy that wrote its own exit into XFF: only CF's copy goes, so
+        // the proxy still shows, as it does behind Caddy.
+        let behind_cf = forwarded_chain(
+            Some("9.9.9.9, 9.9.9.9, 172.71.146.141, 10.29.121.232"),
+            "9.9.9.9",
+            true,
+            true,
+            Some("9.9.9.9"),
+        );
+        let behind_caddy = forwarded_chain(Some("9.9.9.9, 9.9.9.9"), "9.9.9.9", true, false, None);
+        assert_eq!(behind_cf, vec!["9.9.9.9"]);
+        assert_eq!(behind_caddy, behind_cf);
+        let h = map(&[("x-forwarded-for", "9.9.9.9")]);
+        assert_eq!(
+            anonymity_level(&h, Some("1.1.1.1"), true, true),
+            "anonymous"
         );
     }
 }

@@ -347,8 +347,8 @@ Example `/judge` response through an anonymous proxy, with DB-IP databases:
 
 | `anonymity` | Meaning |
 |---|---|
-| `transparent` | The checker's `direct_ip` appears in the forwarded chain or in any other header value (in any IPv4/IPv6 spelling): the proxy leaks the real client IP. |
-| `anonymous` | No leak, but the proxy reveals itself: `X-Forwarded-For` entries (even `unknown`), or a header that only proxies add: `Via`, `Forwarded`, `Forwarded-For`, `Forwarded-For-IP`, `X-Forwarded`, `X-Real-IP`, `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`, `X-Remote-IP`, `X-Remote-Addr`, `Coming-From`, `X-Coming-From`, `Xroxy-Connection`, `Proxy-*`, `X-Proxy*`. |
+| `transparent` | The checker's `direct_ip` appears in the forwarded chain or in any other header value but `Host` (in any IPv4/IPv6 spelling, percent-encoded too): the proxy leaks the real client IP. |
+| `anonymous` | No leak, but the proxy reveals itself: `X-Forwarded-For` entries of its own (even `unknown`; with `TRUST_PROXY=0`, even an empty header), or a header that only proxies add: `Via`, `Forwarded`, `Forwarded-For`, `Forwarded-For-IP`, `X-Forwarded`, any other `X-Forwarded-*` and `X-Real-Port` when nothing stands in front of the judge (`TRUST_PROXY=0`), `X-Real-IP`, `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`, `X-Remote-IP`, `X-Remote-Addr`, `Coming-From`, `X-Coming-From`, `Xroxy-Connection`, `Proxy-*`, `X-Proxy*`. |
 | `elite` | Neither: the request looks like a direct one. |
 
 ```mermaid

@@ -350,8 +350,8 @@ Cloudflare Tunnel в этом варианте не требуется: TLS и �
 
 | `anonymity` | Значение |
 |---|---|
-| `transparent` | `direct_ip` проверяющего найден в цепочке форвардинга или в значении любого другого заголовка (в любой записи IPv4/IPv6): прокси сливает реальный IP. |
-| `anonymous` | Утечки нет, но прокси себя выдаёт: записи `X-Forwarded-For` (даже `unknown`) или заголовок, который добавляют только прокси: `Via`, `Forwarded`, `Forwarded-For`, `Forwarded-For-IP`, `X-Forwarded`, `X-Real-IP`, `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`, `X-Remote-IP`, `X-Remote-Addr`, `Coming-From`, `X-Coming-From`, `Xroxy-Connection`, `Proxy-*`, `X-Proxy*`. |
+| `transparent` | `direct_ip` проверяющего найден в цепочке форвардинга или в значении любого другого заголовка, кроме `Host` (в любой записи IPv4/IPv6, в том числе в URL-кодировке): прокси сливает реальный IP. |
+| `anonymous` | Утечки нет, но прокси себя выдаёт: свои записи `X-Forwarded-For` (даже `unknown`; при `TRUST_PROXY=0` даже пустой заголовок) или заголовок, который добавляют только прокси: `Via`, `Forwarded`, `Forwarded-For`, `Forwarded-For-IP`, `X-Forwarded`, любой другой `X-Forwarded-*` и `X-Real-Port`, когда перед judge никого нет (`TRUST_PROXY=0`), `X-Real-IP`, `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`, `X-Remote-IP`, `X-Remote-Addr`, `Coming-From`, `X-Coming-From`, `Xroxy-Connection`, `Proxy-*`, `X-Proxy*`. |
 | `elite` | Ни того, ни другого: запрос выглядит как прямой. |
 
 ```mermaid

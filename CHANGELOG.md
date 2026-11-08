@@ -31,6 +31,22 @@
   over plain HTTP on port 80 and redirect the rest to HTTPS. Before, they
   redirected all HTTP, so no documented deployment gave an anonymity verdict.
   The README now says which deployments and public instances answer plain HTTP.
+- Without `TRUST_PROXY`, `X-Forwarded-Proto`, `-Host`, `-Port` and every
+  other `X-Forwarded-*` header mark a proxy, as does an empty
+  `X-Forwarded-For`; before, they always counted as the judge's own reverse
+  proxy and gave `elite`. Their values are now searched for a leak with or
+  without `TRUST_PROXY`, so an `X-Forwarded-Host` with the checker's real IP
+  is `transparent` (a copy of `Host` our reverse proxy makes is not).
+- A leaked address is found in looser notations: `for=1.2.3.4` or
+  `"1.2.3.4"` in `X-Forwarded-For`, an address followed by a full stop or
+  preceded by a label (`src:2001:db8::1`), and percent-encoded addresses. The
+  `Host` header is no longer searched: it names the judge. Behind Cloudflare,
+  only `CF-Connecting-IP` and a `True-Client-IP` that repeats it are left
+  out of the search; a proxy's value in `CDN-Loop` or its own
+  `True-Client-IP` is found.
+- A proxy that writes its own exit address into `X-Forwarded-For` is
+  `anonymous` behind Cloudflare too, as it already was behind Caddy and nginx;
+  only the copy Cloudflare appends is removed.
 - `--check-geo` fails when a database file it tries cannot be used, not only
   when none loads, and `download-dbip.sh` checks City and ASN each on its
   own. Before, a good City file let a broken ASN download replace a working

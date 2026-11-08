@@ -509,7 +509,7 @@ async fn judge(
     // garbage direct_ip is ignored instead of compared (a header value
     // could otherwise "match" it and fake a transparent verdict)
     let direct = direct_raw.and_then(normalize_host);
-    let level = anonymity_level(&view, direct.as_deref(), s.trust_cf);
+    let level = anonymity_level(&view, direct.as_deref(), s.trust_proxy, s.trust_cf);
 
     let g = geo_cached(&s, &me);
     let ptr = maybe_rdns(&s, &me, g.aso.as_deref()).await;
