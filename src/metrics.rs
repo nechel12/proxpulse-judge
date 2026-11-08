@@ -49,7 +49,7 @@ impl Metrics {
             ),
             (
                 "proxpulse_rdns_timeouts_total",
-                "rDNS lookups that exceeded the request timeout.",
+                "rDNS lookups that exceeded RDNS_TIMEOUT or failed.",
                 &self.rdns_timeouts,
             ),
             (

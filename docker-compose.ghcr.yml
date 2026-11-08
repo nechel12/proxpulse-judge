@@ -11,6 +11,8 @@ services:
     image: ghcr.io/nechel12/proxpulse-judge:latest
     container_name: proxpulse-judge
     restart: unless-stopped
+    # The service drains for up to 25 s; Docker's default 10 s would cut it.
+    stop_grace_period: 30s
     ports:
       - "127.0.0.1:${PORT:-8000}:${PORT:-8000}" # only the reverse proxy faces outward
     env_file:

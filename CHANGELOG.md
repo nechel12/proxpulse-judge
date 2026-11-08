@@ -75,6 +75,10 @@
   one.
 - Of several dated databases of one kind (`dbip-city-lite-2026-11.mmdb`), the
   newest is used instead of the oldest.
+- Logs carry no colour codes when they go to a file or Docker; a failed
+  Ctrl+C handler no longer starts a shutdown at once; `requests_total` counts
+  requests the client cut off; and the compose files give the 25-second drain
+  its time (`stop_grace_period: 30s`).
 
 ## [0.6.1] — 2026-11-07
 

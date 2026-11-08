@@ -63,8 +63,12 @@ fn healthcheck(addr: SocketAddr) -> bool {
 }
 
 async fn shutdown_signal() {
+    // Without a Ctrl+C handler, wait for SIGTERM alone instead of shutting
+    // down at once.
     let ctrl_c = async {
-        tokio::signal::ctrl_c().await.ok();
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
     };
     // Docker sends SIGTERM on `stop` — without this arm the container
     // would die mid-request instead of draining gracefully.
@@ -91,7 +95,11 @@ async fn shutdown_signal() {
 async fn main() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Colour only on a terminal: Docker and journald logs got escape codes.
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+        .init();
 
     if std::env::args().any(|a| a == "--healthcheck") {
         let healthy = config::probe_addr().is_some_and(healthcheck);

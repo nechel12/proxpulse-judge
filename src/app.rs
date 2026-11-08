@@ -110,8 +110,9 @@ async fn metrics_mw(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let res = next.run(req).await;
+    // Counted on arrival: a request the client abandons is still a request.
     inc(&s.metrics.requests);
+    let res = next.run(req).await;
     let status = res.status();
     if status.is_client_error() {
         inc(&s.metrics.responses_4xx);
