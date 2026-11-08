@@ -572,9 +572,15 @@ mod tests {
 
     #[test]
     fn content_hash_stable() {
-        assert_eq!(content_sha256().len(), 64);
-        assert_eq!(content_sha256(), content_sha256());
-        assert!(FIXED_CONTENT.len() > 32);
+        // Checkers compare against this hash: changing FIXED_CONTENT fails
+        // here until CONTENT_VERSION is bumped along with the new hash.
+        assert_eq!(
+            (CONTENT_VERSION, content_sha256().as_str()),
+            (
+                1,
+                "1a0525d8797ca470e7b4a7c47622a89b011760f9db2d587ce7a5e06e99c1bcb9"
+            )
+        );
     }
 
     #[test]

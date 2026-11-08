@@ -709,6 +709,76 @@ mod api_tests {
     }
 
     #[tokio::test]
+    async fn client_headers_are_ignored_without_trust_flags() {
+        // TRUST_PROXY=0 and TRUST_CF=0 (the defaults): spoofed addresses
+        // neither change the client IP nor escape the rate limit.
+        let mut cfg = test_config(2, Duration::ZERO);
+        cfg.trust_proxy = false;
+        cfg.trust_cf = false;
+        let app = test_app_with(&cfg);
+        let spoofed =
+            |ip: &str| get_with("/ip", &[("x-forwarded-for", ip), ("cf-connecting-ip", ip)]);
+        assert_eq!(
+            json(app.clone(), spoofed("9.9.9.9")).await["ip"],
+            "127.0.0.1"
+        );
+        let ok = app.clone().oneshot(spoofed("8.8.8.8")).await.unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let limited = app.clone().oneshot(spoofed("7.7.7.7")).await.unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // What the client sent is the proxy's, not our edge's.
+        let v = json(
+            test_app_with(&cfg),
+            get_with(
+                "/judge?direct_ip=1.1.1.1",
+                &[("x-forwarded-for", "1.1.1.1")],
+            ),
+        )
+        .await;
+        assert_eq!(v["ip"], "127.0.0.1");
+        assert_eq!(v["anonymity"], "transparent");
+
+        // trust_cf alone (config clears it, the resolver checks again).
+        cfg.trust_cf = true;
+        let v = json(test_app_with(&cfg), spoofed("9.9.9.9")).await;
+        assert_eq!(v["ip"], "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_answers_before_waiting_for_a_slot() {
+        // A client over its limit gets 429 at once instead of queueing for
+        // one of the concurrency slots; monitoring needs no slot at all.
+        let state = test_state(Path::new(NO_GEO_DIR), &test_config(1, Duration::ZERO));
+        let app = test_app_with_state(state.clone());
+        let first = app.clone().oneshot(get_with("/ip", &[])).await.unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let _all_slots = state
+            .concurrency
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENCY as u32)
+            .await
+            .unwrap();
+        let quick = |req: Request<Body>| {
+            let app = app.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(1), app.oneshot(req))
+                    .await
+                    .expect("answered without waiting for a slot")
+                    .unwrap()
+                    .status()
+            }
+        };
+        assert_eq!(
+            quick(get_with("/ip", &[])).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        for path in ["/healthz", "/readyz", "/metrics"] {
+            assert_eq!(quick(get_with(path, &[])).await, StatusCode::OK, "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn garbage_direct_ip_is_ignored() {
         // user-agent "matches" the garbage direct_ip — must NOT fake transparent
         let v = json(
@@ -1116,10 +1186,13 @@ mod api_tests {
             Path::new(NO_GEO_DIR),
             &test_config(1_000_000, Duration::from_millis(50)),
         );
-        let t0 = Instant::now();
-        let res = maybe_rdns(&state, "8.8.8.8", Some("Google LLC")).await;
-        assert!(res.is_none());
-        assert!(t0.elapsed() < Duration::from_secs(5));
+        assert!(
+            maybe_rdns(&state, "8.8.8.8", Some("Google LLC"))
+                .await
+                .is_none()
+        );
+        assert_eq!(state.metrics.rdns_lookups.load(Ordering::Relaxed), 0);
+        assert!(state.ptr_cache.get("8.8.8.8").is_none());
     }
 
     #[tokio::test]
@@ -1177,12 +1250,20 @@ mod api_tests {
     }
 
     #[tokio::test]
-    async fn content_stable() {
-        let a = test_app().oneshot(get_with("/content", &[])).await.unwrap();
-        let b = test_app().oneshot(get_with("/content", &[])).await.unwrap();
-        let ba = axum::body::to_bytes(a.into_body(), 65536).await.unwrap();
-        let bb = axum::body::to_bytes(b.into_body(), 65536).await.unwrap();
-        assert_eq!(ba, bb);
-        assert!(ba.len() > 32);
+    async fn content_is_the_fixed_reference_the_judge_announces() {
+        let res = test_app().oneshot(get_with("/content", &[])).await.unwrap();
+        // The one cacheable answer.
+        assert!(res.headers().get(CACHE_CONTROL).is_none());
+        let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+        assert_eq!(&body[..], logic::FIXED_CONTENT);
+        // /judge announces the hash of exactly these bytes.
+        let v = json(test_app(), get_with("/judge", &[])).await;
+        use sha2::Digest;
+        let hex: String = sha2::Sha256::digest(&body)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(v["content_sha256"], hex);
+        assert_eq!(v["content_version"], logic::CONTENT_VERSION);
     }
 }
