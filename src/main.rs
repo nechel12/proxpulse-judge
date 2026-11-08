@@ -23,6 +23,10 @@ use geo::GeoPool;
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Open connections at once, idle keep-alive ones included.
 const MAX_CONNECTIONS: usize = 4096;
+/// A response write that makes no progress for this long closes the connection.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// One connection, busy or not, is closed after this time.
+const MAX_CONNECTION_AGE: Duration = Duration::from_secs(300);
 
 fn healthcheck(addr: SocketAddr) -> bool {
     use std::io::{Read, Write};
@@ -140,6 +144,8 @@ async fn main() {
     let limits = server::Limits {
         header_read_timeout: HEADER_READ_TIMEOUT,
         max_connections: MAX_CONNECTIONS,
+        write_timeout: WRITE_TIMEOUT,
+        max_connection_age: MAX_CONNECTION_AGE,
         shutdown_grace: REQUEST_TIMEOUT + Duration::from_secs(5),
     };
     server::serve(listener, app, limits, shutdown_signal()).await;

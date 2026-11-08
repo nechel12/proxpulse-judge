@@ -6,6 +6,14 @@
 
 - A setting that is not valid Unicode now stops startup, except `RUST_LOG`.
   Before, it counted as unset, so such a `METRICS_TOKEN` left `/metrics` open.
+- A client that connects and sends nothing, or only the start of an HTTP/2
+  preface, is now cut off by the 10-second header timeout. Before, it held one
+  of the 4096 connection slots forever, so enough of them stopped the service,
+  `/healthz` included. The judge now serves HTTP/1 only (every edge in front
+  of it talks HTTP/1.1), buffers at most 64 KB per connection while reading
+  headers, closes a connection whose response makes no progress for 30
+  seconds (a client that stops reading), and closes any connection after 5
+  minutes.
 
 ## [0.6.1] — 2026-11-07
 
