@@ -32,7 +32,7 @@ In scope:
 
 - HTTP and header parsing, anonymity verdicts, answer signing and key handling,
   rate limiting, IP/geo handling.
-- Dockerfiles, entrypoint, database download scripts, and CI workflows.
+- The Dockerfile, entrypoint, database download scripts, and CI workflows.
 - The public source code and published container images.
 
 Out of scope:

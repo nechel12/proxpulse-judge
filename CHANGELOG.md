@@ -91,6 +91,9 @@
   `docker stop`, and the health check waits out a first download. The smoke
   scripts keep a failed container for its logs, check `--healthcheck`, and
   report failed requests instead of stopping silently.
+- `geo/README.md` renders as text instead of nine headings, and the README
+  no longer suggests logrotate for logs that go to stdout (journald keeps
+  them under systemd).
 
 ## [0.6.1] — 2026-11-07
 

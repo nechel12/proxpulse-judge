@@ -25,7 +25,7 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # Databases live in RAM (DB-IP City + ASN ≈ 200 MB) plus caches.
+    # Databases live in RAM (DB-IP City + ASN ≈ 140 MB) plus caches.
     mem_limit: 512m
     logging:
       driver: json-file

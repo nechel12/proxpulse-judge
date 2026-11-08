@@ -83,14 +83,11 @@ fn is_monitoring(path: &str) -> bool {
 
 async fn rate_limit_mw(
     State(s): State<Arc<AppState>>,
+    ConnectInfo(conn): ConnectInfo<SocketAddr>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
     if !is_monitoring(req.uri().path()) {
-        let conn = req
-            .extensions()
-            .get::<ConnectInfo<SocketAddr>>()
-            .map(|c| c.0);
         let client = self_ip(&s, req.headers(), conn);
         if let Some(secs) = s.rate_limit.check(&client) {
             inc(&s.metrics.rate_limited);
@@ -201,7 +198,7 @@ struct JudgeParams {
 
 /// Join all values of a header with ", " so duplicate header lines are
 /// handled the same way everywhere. `HeaderMap::get` only returns the
-/// first value, while `iter()` yields the last one per name — that
+/// first value, while `iter()` yields every value separately — that
 /// mismatch used to produce an inconsistent `ip`/`xff_chain` pair.
 fn joined_header(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut values = headers.get_all(name).iter();
@@ -223,14 +220,15 @@ fn headers_lower(headers: &HeaderMap) -> HashMap<String, String> {
         .collect()
 }
 
-fn self_ip(s: &AppState, headers: &HeaderMap, conn: Option<SocketAddr>) -> String {
+/// The client address. The server always attaches the socket address; a
+/// stand-in would have put every client into one rate-limit bucket.
+fn self_ip(s: &AppState, headers: &HeaderMap, conn: SocketAddr) -> String {
     let cf = joined_header(headers, "cf-connecting-ip");
     let xff = joined_header(headers, "x-forwarded-for");
-    let sock = conn.map(|addr| addr.ip().to_string());
     client_ip(
         cf.as_deref(),
         xff.as_deref(),
-        sock.as_deref().unwrap_or("127.0.0.1"),
+        &conn.ip().to_string(),
         s.trust_proxy,
         s.trust_cf,
     )
@@ -451,7 +449,7 @@ async fn ip(
     conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    Json(serde_json::json!({ "ip": self_ip(&s, &headers, Some(conn.0)) }))
+    Json(serde_json::json!({ "ip": self_ip(&s, &headers, conn.0) }))
 }
 
 async fn headers_echo(
@@ -459,7 +457,7 @@ async fn headers_echo(
     conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&s, &headers, Some(conn.0));
+    let me = self_ip(&s, &headers, conn.0);
     let (view, chain) = proxy_view(&s, &headers, &me);
     Json(serde_json::json!({ "ip": me, "headers": view, "xff_chain": chain }))
 }
@@ -469,7 +467,7 @@ async fn geo_ep(
     conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&s, &headers, Some(conn.0));
+    let me = self_ip(&s, &headers, conn.0);
     let data = geo_cached(&s, &me);
     Json(serde_json::json!({
         "ip": me,
@@ -493,7 +491,7 @@ async fn ip_type(
     conn: ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let me = self_ip(&s, &headers, Some(conn.0));
+    let me = self_ip(&s, &headers, conn.0);
     let data = geo_cached(&s, &me);
     let ptr = maybe_rdns(&s, &me, data.aso.as_deref()).await;
     let (t, signals) = classify_ip(data.aso.as_deref(), ptr.as_deref());
@@ -519,7 +517,7 @@ async fn judge(
     headers: HeaderMap,
     Query(p): Query<JudgeParams>,
 ) -> Response {
-    let me = self_ip(&s, &headers, Some(conn.0));
+    let me = self_ip(&s, &headers, conn.0);
     let (view, chain) = proxy_view(&s, &headers, &me);
     // A line feed would move bytes between the signed fields (sign::message),
     // so such a value counts as absent for the verdict and the signature alike.

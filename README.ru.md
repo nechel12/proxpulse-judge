@@ -569,19 +569,8 @@ mount); иначе в лог пишется warning и сервис старту
 сервис в compose работает с read-only корневой ФС, без capabilities, с
 `no-new-privileges` и лимитом памяти 512 МБ.
 
-Для запуска без Docker с логами в файл — пример
-`/etc/logrotate.d/proxpulse-judge`:
-
-```
-/opt/proxpulse-judge/*.log /var/log/proxpulse-judge/*.log {
-    weekly
-    rotate 4
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-```
+Без Docker бинарник тоже пишет логи в stdout: под systemd их хранит и
+ротирует journald (`journalctl -u proxpulse-judge`).
 
 ## Конфигурация
 

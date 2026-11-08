@@ -9,12 +9,9 @@ repository = "https://github.com/nechel12/proxpulse-judge"
 readme = "README.md"
 publish = false
 
-[[bin]]
-name = "proxpulse-judge"
-path = "src/main.rs"
-
 [dependencies]
-axum = "0.8"
+# Only what the service uses: it serves through its own hyper loop.
+axum = { version = "0.8", default-features = false, features = ["json", "query", "tokio"] }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["http1", "server-graceful", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }

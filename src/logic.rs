@@ -272,17 +272,6 @@ pub fn normalize_chain(entries: &[String]) -> Vec<String> {
     entries.iter().filter_map(|e| normalize_host(e)).collect()
 }
 
-#[cfg(test)]
-fn forwarded_chain(
-    xff: Option<&str>,
-    client: &str,
-    trust_proxy: bool,
-    trust_cf: bool,
-    cf_ip: Option<&str>,
-) -> Vec<String> {
-    normalize_chain(&pre_edge_xff(xff, client, trust_proxy, trust_cf, cf_ip))
-}
-
 /// A (lowercased) header our own side adds: not blamed on the checked proxy.
 /// Only Cloudflare's own names count as Cloudflare's: arbitrary `cf-*` names
 /// pass through its edge.
@@ -456,7 +445,7 @@ const BUSINESS_KW: &[&str] = &[
     "hotel",
 ];
 
-/// Whole-word match: "inc" must not match "Zinc", "host" must not match
+/// Whole-word match: "cdn" must not match "cdnow", "host" must not match
 /// "ghost". Multi-word keywords are matched as phrases with the same
 /// boundary rule.
 fn contains_word(text: &str, needle: &str) -> bool {
@@ -569,6 +558,16 @@ pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (String, TypeSignal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn forwarded_chain(
+        xff: Option<&str>,
+        client: &str,
+        trust_proxy: bool,
+        trust_cf: bool,
+        cf_ip: Option<&str>,
+    ) -> Vec<String> {
+        normalize_chain(&pre_edge_xff(xff, client, trust_proxy, trust_cf, cf_ip))
+    }
 
     fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

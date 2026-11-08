@@ -561,19 +561,8 @@ size limit by default, so `docker-compose.yml` sets limits (`max-size: 10m`,
 configuration is needed. The compose service also runs with a read-only root
 filesystem, no capabilities, `no-new-privileges`, and a 512 MB memory limit.
 
-For running without Docker with logs in a file — example
-`/etc/logrotate.d/proxpulse-judge`:
-
-```
-/opt/proxpulse-judge/*.log /var/log/proxpulse-judge/*.log {
-    weekly
-    rotate 4
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-```
+Without Docker the binary logs to stdout too: under systemd, journald keeps
+and rotates the log (`journalctl -u proxpulse-judge`).
 
 ## Configuration
 
