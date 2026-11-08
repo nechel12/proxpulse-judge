@@ -15,6 +15,16 @@
   seconds (a client that stops reading), and closes any connection after 5
   minutes.
 
+### Fixed
+
+- `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`,
+  `Forwarded-For`, `Forwarded-For-IP`, `X-Forwarded`, `X-Remote-IP`,
+  `X-Remote-Addr`, `Coming-From`, `X-Coming-From`, and `Xroxy-Connection` now
+  mark a proxy, so such a proxy is `anonymous` instead of a false `elite`.
+  **Upgrade note:** a platform in front of the judge that adds one of them
+  itself (Azure App Service adds `Client-IP` and `X-Client-IP`) needs it in
+  `EDGE_HEADERS`, or every check comes out `anonymous`.
+
 ## [0.6.1] — 2026-11-07
 
 ### Security

@@ -320,7 +320,7 @@ Example `/judge` response through an anonymous proxy, with DB-IP databases:
 | `anonymity` | Meaning |
 |---|---|
 | `transparent` | The checker's `direct_ip` appears in the forwarded chain or in any other header value (in any IPv4/IPv6 spelling): the proxy leaks the real client IP. |
-| `anonymous` | No leak, but the proxy reveals itself: `X-Forwarded-For` entries (even `unknown`), or `Via`, `Forwarded`, `X-Real-IP`, `Proxy-*`, `X-Proxy*` headers. |
+| `anonymous` | No leak, but the proxy reveals itself: `X-Forwarded-For` entries (even `unknown`), or a header that only proxies add: `Via`, `Forwarded`, `Forwarded-For`, `Forwarded-For-IP`, `X-Forwarded`, `X-Real-IP`, `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`, `X-Remote-IP`, `X-Remote-Addr`, `Coming-From`, `X-Coming-From`, `Xroxy-Connection`, `Proxy-*`, `X-Proxy*`. |
 | `elite` | Neither: the request looks like a direct one. |
 
 ```mermaid
@@ -328,7 +328,7 @@ flowchart TD
     A[Request through the checked proxy] --> B["Removing what the deployment edge added:<br/>XFF hops (TRUST_PROXY), CF headers (TRUST_CF), EDGE_HEADERS"]
     B --> C{"direct_ip in XFF<br/>or in any header value?"}
     C -- yes --> T[transparent]
-    C -- no --> D{"XFF entries left, or Via / Forwarded /<br/>X-Real-IP / Proxy-* headers?"}
+    C -- no --> D{"XFF entries left, or Via / Forwarded /<br/>X-Real-IP / X-Client-IP / Proxy-* and similar?"}
     D -- yes --> N[anonymous]
     D -- no --> E[elite]
 ```
@@ -547,7 +547,7 @@ limits; metrics are process-local and reset on restart.
 
 | Symptom | Cause and fix |
 |---|---|
-| Every check is `anonymous`, even an elite proxy | A reverse proxy on the deployment side adds `X-Real-IP`, `Via`, or `Forwarded` (typical for nginx). Such headers are removed from the proxy configuration or listed in `EDGE_HEADERS`. `GET /headers` directly shows what reaches the judge. |
+| Every check is `anonymous`, even an elite proxy | A reverse proxy or hosting platform on the deployment side adds a proxy header itself: `X-Real-IP`, `Via`, or `Forwarded` (typical for nginx), `Client-IP` or `X-Client-IP` (Azure App Service). Such headers are removed from the proxy configuration or listed in `EDGE_HEADERS`. `GET /headers` directly shows what reaches the judge. |
 | A direct check (no proxy) is `transparent`, and `/ip` shows `127.0.0.1` or `172.x` | The judge is behind a reverse proxy with `TRUST_PROXY=0`: `TRUST_PROXY=1` is required. |
 | A proxy known to leak is reported `elite` behind Caddy | Caddy drops the incoming `X-Forwarded-For`: `trusted_proxies` is required, as in `Caddyfile.example`. `/judge` must also be reached over plain HTTP, see [Signed answers](#signed-answers). |
 | `/ip` shows a Cloudflare address (`172.64.x`, `162.158.x`, …) | Traffic comes through Cloudflare but `TRUST_CF=0`: `TRUST_CF=1` and `TRUST_PROXY=1` are required. |

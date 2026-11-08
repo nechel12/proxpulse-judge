@@ -322,7 +322,7 @@ Cloudflare Tunnel в этом варианте не требуется: TLS и �
 | `anonymity` | Значение |
 |---|---|
 | `transparent` | `direct_ip` проверяющего найден в цепочке форвардинга или в значении любого другого заголовка (в любой записи IPv4/IPv6): прокси сливает реальный IP. |
-| `anonymous` | Утечки нет, но прокси себя выдаёт: записи `X-Forwarded-For` (даже `unknown`) или заголовки `Via`, `Forwarded`, `X-Real-IP`, `Proxy-*`, `X-Proxy*`. |
+| `anonymous` | Утечки нет, но прокси себя выдаёт: записи `X-Forwarded-For` (даже `unknown`) или заголовок, который добавляют только прокси: `Via`, `Forwarded`, `Forwarded-For`, `Forwarded-For-IP`, `X-Forwarded`, `X-Real-IP`, `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`, `X-Remote-IP`, `X-Remote-Addr`, `Coming-From`, `X-Coming-From`, `Xroxy-Connection`, `Proxy-*`, `X-Proxy*`. |
 | `elite` | Ни того, ни другого: запрос выглядит как прямой. |
 
 ```mermaid
@@ -330,7 +330,7 @@ flowchart TD
     A[Запрос через проверяемый прокси] --> B["Удаление добавленного edge развёртывания:<br/>хопы XFF (TRUST_PROXY), CF-заголовки (TRUST_CF), EDGE_HEADERS"]
     B --> C{"direct_ip в XFF<br/>или в значении заголовка?"}
     C -- да --> T[transparent]
-    C -- нет --> D{"Остались записи XFF или есть Via / Forwarded /<br/>X-Real-IP / Proxy-*?"}
+    C -- нет --> D{"Остались записи XFF или есть Via / Forwarded /<br/>X-Real-IP / X-Client-IP / Proxy-* и подобные?"}
     D -- да --> N[anonymous]
     D -- нет --> E[elite]
 ```
@@ -552,7 +552,7 @@ mount); иначе в лог пишется warning и сервис старту
 
 | Симптом | Причина и решение |
 |---|---|
-| Все проверки `anonymous`, даже elite-прокси | Реверс-прокси на стороне развёртывания добавляет `X-Real-IP`, `Via` или `Forwarded` (типично для nginx). Такие заголовки удаляются из конфигурации прокси или перечисляются в `EDGE_HEADERS`. Прямой `GET /headers` покажет, что доходит до judge. |
+| Все проверки `anonymous`, даже elite-прокси | Реверс-прокси или хостинг на стороне развёртывания сам добавляет заголовок прокси: `X-Real-IP`, `Via` или `Forwarded` (типично для nginx), `Client-IP` или `X-Client-IP` (Azure App Service). Такие заголовки удаляются из конфигурации прокси или перечисляются в `EDGE_HEADERS`. Прямой `GET /headers` покажет, что доходит до judge. |
 | Прямая проверка (без прокси) — `transparent`, а `/ip` показывает `127.0.0.1` или `172.x` | Judge стоит за реверс-прокси с `TRUST_PROXY=0`: требуется `TRUST_PROXY=1`. |
 | Заведомо «текущий» прокси за Caddy получает `elite` | Caddy отбрасывает входящий `X-Forwarded-For`: требуется `trusted_proxies`, как в `Caddyfile.example`. Кроме того, `/judge` должен быть доступен по обычному HTTP, см. [Подпись ответов](#подпись-ответов). |
 | `/ip` показывает адрес Cloudflare (`172.64.x`, `162.158.x`, …) | Трафик идёт через Cloudflare, а `TRUST_CF=0`: требуются `TRUST_CF=1` и `TRUST_PROXY=1`. |

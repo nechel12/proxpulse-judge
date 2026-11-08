@@ -227,23 +227,34 @@ fn is_infra(name: &str, trust_cf: bool) -> bool {
     INFRA_HEADERS.contains(&n.as_str()) || (trust_cf && CF_INFRA_HEADERS.contains(&n.as_str()))
 }
 
+/// Header names that only a proxy on the way adds: their presence alone means
+/// "not elite", whatever their value. Cloudflare's own headers are not here:
+/// a judge behind Cloudflare with `TRUST_CF=0` would then call every proxy
+/// anonymous; their values are still scanned for the client's address.
+const TELLTALE_HEADERS: &[&str] = &[
+    "via",
+    "forwarded",
+    "forwarded-for",
+    "forwarded-for-ip",
+    "x-forwarded",
+    "x-real-ip",
+    "client-ip",
+    "x-client-ip",
+    "x-originating-ip",
+    "x-cluster-client-ip",
+    "x-remote-ip",
+    "x-remote-addr",
+    "coming-from",
+    "x-coming-from",
+    "xroxy-connection",
+];
+
 fn is_telltale(name: &str, trust_cf: bool) -> bool {
     let n = name.to_ascii_lowercase();
     if is_infra(&n, trust_cf) {
         return false;
     }
-    matches!(
-        n.as_str(),
-        "via"
-            | "forwarded"
-            | "proxy-connection"
-            | "proxy-authorization"
-            | "proxy-authenticate"
-            | "proxy-agent"
-            | "x-proxy-id"
-            | "x-real-ip"
-    ) || n.starts_with("proxy-")
-        || n.starts_with("x-proxy")
+    TELLTALE_HEADERS.contains(&n.as_str()) || n.starts_with("proxy-") || n.starts_with("x-proxy")
 }
 
 /// levels: elite | anonymous | transparent.
@@ -664,6 +675,48 @@ mod tests {
             anonymity_level(&map(&[("via", "1.0 proxy")]), Some("1.1.1.1"), true),
             "anonymous"
         );
+    }
+
+    #[test]
+    fn proxy_headers_are_never_elite() {
+        // Each of these only appears when a proxy is on the way; with a value
+        // that is not the client's address the verdict is still not elite.
+        for name in [
+            "Via",
+            "Forwarded",
+            "Forwarded-For",
+            "Forwarded-For-IP",
+            "X-Forwarded",
+            "X-Real-IP",
+            "Client-IP",
+            "X-Client-IP",
+            "X-Originating-IP",
+            "X-Cluster-Client-IP",
+            "X-Remote-IP",
+            "X-Remote-Addr",
+            "Coming-From",
+            "X-Coming-From",
+            "Xroxy-Connection",
+            "Proxy-Connection",
+            "X-ProxyUser-Ip",
+        ] {
+            for trust_cf in [false, true] {
+                for direct in [Some("1.1.1.1"), None] {
+                    let h = map(&[(&name.to_ascii_lowercase(), "9.9.9.9")]);
+                    assert_eq!(
+                        anonymity_level(&h, direct, trust_cf),
+                        "anonymous",
+                        "{name} trust_cf={trust_cf} direct={direct:?}"
+                    );
+                }
+            }
+        }
+        // The same headers carrying the client's own address leak it.
+        let h = map(&[("x-client-ip", "1.1.1.1")]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), false), "transparent");
+        // Cloudflare's headers alone do not mark a proxy (see TELLTALE_HEADERS).
+        let h = map(&[("cf-connecting-ip", "9.9.9.9"), ("cf-ray", "x")]);
+        assert_eq!(anonymity_level(&h, Some("1.1.1.1"), false), "elite");
     }
 
     #[test]
