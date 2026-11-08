@@ -31,6 +31,12 @@
   over plain HTTP on port 80 and redirect the rest to HTTPS. Before, they
   redirected all HTTP, so no documented deployment gave an anonymity verdict.
   The README now says which deployments and public instances answer plain HTTP.
+- `--check-geo` fails when any database file in the folder cannot be used,
+  not only when none loads, and `download-dbip.sh` checks City and ASN each on
+  its own. Before, a good City file let a broken ASN download replace a working
+  one.
+- Of several dated databases of one kind (`dbip-city-lite-2026-11.mmdb`), the
+  newest is used instead of the oldest.
 
 ## [0.6.1] — 2026-11-07
 

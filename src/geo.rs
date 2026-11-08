@@ -50,6 +50,9 @@ pub struct GeoPool {
     country: Option<Reader<Vec<u8>>>,
     asn: Option<Reader<Vec<u8>>>,
     sources: std::collections::HashMap<String, String>,
+    /// Database files that were found but could not be used (unreadable, or
+    /// not the kind their name says); `verify` fails on them.
+    skipped: Vec<String>,
 }
 
 fn try_open(path: &Path) -> Option<Reader<Vec<u8>>> {
@@ -62,7 +65,12 @@ fn try_open(path: &Path) -> Option<Reader<Vec<u8>>> {
     }
 }
 
-fn open_first(dir: &Path, names: &[&str]) -> (Option<Reader<Vec<u8>>>, Option<String>) {
+/// The first usable database of one kind, its file name, and the names of
+/// the candidates before it that could not be used.
+fn open_first(
+    dir: &Path,
+    names: &[&str],
+) -> (Option<Reader<Vec<u8>>>, Option<String>, Vec<String>) {
     let mut candidates: Vec<PathBuf> = names
         .iter()
         .map(|n| dir.join(n))
@@ -88,37 +96,44 @@ fn open_first(dir: &Path, names: &[&str]) -> (Option<Reader<Vec<u8>>>, Option<St
                     && !candidates.contains(p)
             })
             .collect();
-        hits.sort();
+        // Newest first: dated names (`dbip-city-lite-2026-11.mmdb`) sort by date.
+        hits.sort_by(|a, b| b.cmp(a));
         candidates.extend(hits);
     }
+    let mut skipped = Vec::new();
     for path in &candidates {
-        if let Some(r) = try_open(path) {
-            let kind = r.metadata().database_type.to_ascii_lowercase();
-            if !kind.contains(pattern) {
-                warn!(
-                    "ignoring {}: database_type {:?} does not look like {}",
-                    path.display(),
-                    r.metadata().database_type,
-                    pattern
-                );
-                continue;
-            }
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?")
-                .to_string();
-            return (Some(r), Some(name));
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let Some(r) = try_open(path) else {
+            skipped.push(name);
+            continue;
+        };
+        let kind = r.metadata().database_type.to_ascii_lowercase();
+        if !kind.contains(pattern) {
+            warn!(
+                "ignoring {}: database_type {:?} does not look like {}",
+                path.display(),
+                r.metadata().database_type,
+                pattern
+            );
+            skipped.push(name);
+            continue;
         }
+        return (Some(r), Some(name), skipped);
     }
-    (None, None)
+    (None, None, skipped)
 }
 
 impl GeoPool {
     pub fn open(dir: &Path) -> Self {
-        let (city, city_src) = open_first(dir, CITY_CANDIDATES);
-        let (country, country_src) = open_first(dir, COUNTRY_CANDIDATES);
-        let (asn, asn_src) = open_first(dir, ASN_CANDIDATES);
+        let (city, city_src, mut skipped) = open_first(dir, CITY_CANDIDATES);
+        let (country, country_src, more) = open_first(dir, COUNTRY_CANDIDATES);
+        skipped.extend(more);
+        let (asn, asn_src, more) = open_first(dir, ASN_CANDIDATES);
+        skipped.extend(more);
         let mut sources = std::collections::HashMap::new();
         if let Some(s) = city_src {
             sources.insert("city".to_string(), s);
@@ -134,6 +149,7 @@ impl GeoPool {
             country,
             asn,
             sources,
+            skipped,
         };
         info!("geo sources: {:?} (dir={})", pool.sources(), dir.display());
         pool
@@ -228,9 +244,13 @@ impl GeoPool {
         out
     }
 
-    /// Full structural validation of every loaded database. Expensive:
-    /// intended for `--check-geo` after downloads, not per request.
+    /// Full structural validation of every loaded database, and an error for
+    /// any database file that could not be loaded at all. Expensive: intended
+    /// for `--check-geo` after downloads, not per request.
     pub fn verify(&self) -> Result<(), String> {
+        if !self.skipped.is_empty() {
+            return Err(format!("cannot use {}", self.skipped.join(", ")));
+        }
         let mut any = false;
         for (kind, reader) in [
             ("city", self.city.as_ref()),
@@ -627,6 +647,42 @@ mod tests {
         let pool = GeoPool::open(dir.path());
         assert!(pool.sources().is_empty());
         assert_eq!(pool.lookup("203.0.113.7").error.as_deref(), Some("no db"));
+        assert!(pool.verify().is_err());
+    }
+
+    #[test]
+    fn one_broken_database_fails_the_check() {
+        // A valid City next to a broken ASN must not pass --check-geo: the
+        // download scripts would replace a working ASN database with it.
+        let dir = TempDir::new("geo-one-broken");
+        test_mmdb::write_city_and_asn(dir.path());
+        std::fs::write(dir.path().join("GeoLite2-ASN.mmdb"), b"not a database").unwrap();
+        let pool = GeoPool::open(dir.path());
+        assert!(pool.sources().contains_key("city"));
+        let err = pool.verify().unwrap_err();
+        assert!(err.contains("GeoLite2-ASN.mmdb"), "{err}");
+    }
+
+    #[test]
+    fn the_newest_dated_database_wins() {
+        let dir = TempDir::new("geo-dated");
+        for (month, code) in [("2026-01", "DE"), ("2026-11", "FR"), ("2026-02", "PL")] {
+            test_mmdb::write(
+                &dir.path().join(format!("dbip-city-lite-{month}.mmdb")),
+                "DBIP-City-Lite",
+                [203, 0, 113, 0],
+                &json!({"country": {"iso_code": code}}),
+            );
+        }
+        let pool = GeoPool::open(dir.path());
+        assert_eq!(
+            pool.sources().get("city").map(String::as_str),
+            Some("dbip-city-lite-2026-11.mmdb")
+        );
+        assert_eq!(
+            pool.lookup("203.0.113.7").country_code.as_deref(),
+            Some("FR")
+        );
     }
 
     #[test]

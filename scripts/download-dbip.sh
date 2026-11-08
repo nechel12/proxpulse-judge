@@ -59,14 +59,21 @@ gunzip -c "$TMP/asn.gz" > "$TMP/dbip-asn-lite.mmdb"
 }
 
 # Full structural validation before replacing the files used by the
-# service. Skipped when the judge binary is not available (host-only run).
+# service, each database in a folder of its own: older judges pass
+# --check-geo when any one database loads, so a broken ASN file next to a
+# good City file would replace a working one. Skipped when the judge binary
+# is not available (host-only run).
 BIN="${JUDGE_BIN:-/app/proxpulse-judge}"
 if [ -x "$BIN" ]; then
-  echo "== validating downloaded databases"
-  if ! GEO_DIR="$TMP" "$BIN" --check-geo; then
-    echo "error: downloaded DB failed validation" >&2
-    exit 1
-  fi
+  for db in dbip-city-lite dbip-asn-lite; do
+    echo "== validating $db"
+    mkdir -p "$TMP/check-$db"
+    ln -f "$TMP/$db.mmdb" "$TMP/check-$db/$db.mmdb" 2>/dev/null       || cp "$TMP/$db.mmdb" "$TMP/check-$db/$db.mmdb"
+    if ! GEO_DIR="$TMP/check-$db" "$BIN" --check-geo; then
+      echo "error: downloaded $db.mmdb failed validation" >&2
+      exit 1
+    fi
+  done
 fi
 
 mv -f "$TMP/dbip-city-lite.mmdb" "$DIR/dbip-city-lite.mmdb"
