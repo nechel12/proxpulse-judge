@@ -94,6 +94,15 @@
 - `geo/README.md` renders as text instead of nine headings, and the README
   no longer suggests logrotate for logs that go to stdout (journald keeps
   them under systemd).
+- A Render service from `render.yaml` gets a generated `METRICS_TOKEN`, so its
+  `/metrics` is no longer open.
+- The README says how the checker learns its own IP (`api.ipify.org`, then
+  this judge's `/ip`), that signatures need judge 0.6.1 or newer, and which
+  version numbers are the checker's; it no longer claims that only what came
+  from the proxy is echoed, mentions that hop-by-hop headers never reach the
+  judge, and fixes the tunnel hostname and network steps. RELEASING
+  recommends rolling back to `:vX.Y.Z` or a digest, not `:YYYYMM`, and the
+  nginx example notes that `http2 on;` needs nginx 1.25.1.
 
 ## [0.6.1] — 2026-11-07
 

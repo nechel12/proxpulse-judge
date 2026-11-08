@@ -20,3 +20,7 @@ services:
         value: 1
       - key: RUST_LOG
         value: info
+      # A public instance must not leave /metrics open: Render generates a
+      # random token (see it under Environment).
+      - key: METRICS_TOKEN
+        generateValue: true

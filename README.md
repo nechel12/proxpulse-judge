@@ -221,8 +221,8 @@ cloudflared tunnel --url http://127.0.0.1:8000
 
 or no config-file commands at all — via the Cloudflare website:
 **Zero Trust → Networks → Tunnels → Create a tunnel**; a tunnel name is
-chosen, and the **Public Hostname** tab contains: subdomain `check`, the
-domain (e.g. `check.yourdomain.com`), service
+chosen, and the **Public Hostname** tab contains: subdomain `check`, domain
+`yourdomain.com` (together `check.yourdomain.com`), service
 `http://proxpulse-judge:8000` (container on the shared network; details below) or
 `http://127.0.0.1:8000` (cloudflared on the host). The token from the website
 is passed into the connector container:
@@ -248,7 +248,8 @@ ingress:
 > container is itself, and the name `proxpulse-judge` is only visible on the
 > shared network. So the tunnel container must sit on the same network as
 > judge — the `proxpulse-net` network from `docker-compose.yml` is created
-> automatically:
+> automatically. The command above starts the tunnel on it already; a tunnel
+> started without `--network proxpulse-net` is connected like this:
 >
 > ```sh
 > docker network connect proxpulse-net cf-tunnel
@@ -303,6 +304,8 @@ Free-plan notes:
   created by hand needs both variables in the Render dashboard
   (Environment). The `PORT` variable is provided by Render and must not
   be overridden.
+- `render.yaml` also generates a random `METRICS_TOKEN`, so `/metrics` of a
+  public instance is not open; the token is under Environment.
 - The image carries DB-IP Lite only: the GeoLite2 EULA restricts public
   redistribution, so MaxMind data is not baked into the published image.
   MaxMind requires the VPS + volume variant above.
@@ -347,7 +350,9 @@ passthrough and `/healthz` as the health check are required.
 
 `/headers` and `/judge` echo the headers as the checked proxy sent them: the
 `X-Forwarded-For` hops appended by the deployment's reverse proxy and
-`EDGE_HEADERS` are removed, so only what came from the proxy side is shown.
+`EDGE_HEADERS` are removed. What the edge adds on its own (`Host`,
+`X-Forwarded-Proto`, Cloudflare's `cf-*`) is still shown; the verdict does not
+blame the proxy for it.
 
 Example `/judge` response through an anonymous proxy, with DB-IP databases:
 
@@ -415,7 +420,13 @@ organization (and the PTR record when the organization is unknown);
 
 ## Using it from the checker
 
-1. Direct `GET /ip` request — the checker's own IP (`direct_ip`).
+How [ProxPulse](https://github.com/nechel12/proxpulse), the checker, uses the
+judge; its README describes the details.
+
+1. The checker's own IP (`direct_ip`), learned directly, not through a proxy:
+   ProxPulse asks `api.ipify.org`, and this judge's `GET /ip` over HTTPS when
+   ipify does not answer. Without it, a leak cannot be seen, so it shows no
+   anonymity verdict.
 2. `GET /judge?direct_ip=<checker-ip>` through a proxy — the `anonymity` field:
    `elite` (leaks nothing), `anonymous` (proxy visible, IP hidden),
    `transparent` (real IP leaked).
@@ -450,28 +461,30 @@ Signatures matter only where `/judge` answers plain HTTP. The Caddy and nginx
 examples serve `/judge`, `/content`, `/headers`, and `/ip` over plain HTTP on
 port 80 and redirect everything else, `/key` included, to HTTPS. Render
 redirects all HTTP to HTTPS, which hides the request from the judge, so
-ProxPulse gets no anonymity verdict from it. (Before 0.6.1 its HTTP-only mode
-reported one from the HTTPS answer, usually a false `elite` whose signature
-still verified.)
+ProxPulse gets no anonymity verdict from it. (Before checker 0.6.1, its
+HTTP-only mode reported one from the HTTPS answer, usually a false `elite`
+whose signature still verified.) Signatures need judge 0.6.1 or newer; an older
+judge answers `/key` with `404` and is treated as unsigned.
 
 The key is only as trustworthy as the channel that delivered it. Over HTTPS,
 TLS authenticates it. Over plain HTTP, a direct request only keeps out a checked
 proxy that is not also on the direct path: anyone on that path (local network,
 ISP, VPN) can substitute the key and forge answers, and a client that falls back
 from HTTPS to HTTP can be forced onto it. Serve `/key` over HTTPS, and pin a
-fixed key in the client when that is not enough. ProxPulse currently falls back
-to HTTP and does not pin the key. From 0.6.1 on, when `/key` gets no clear answer
-it reports no integrity result rather than `ok`. A `404` means an unsigned judge,
-whose answers it only compares by content hash, which does not detect a rewritten
-verdict.
+fixed key in the client when that is not enough. ProxPulse falls back to HTTP,
+then shows a note saying so (for a key and for a `404` alike), follows no
+redirects for `/key`, and does not pin the key. From checker 0.6.1 on, when
+`/key` gets no clear answer it reports no integrity result rather than `ok`. A
+`404` means an unsigned judge, whose answers it only compares by content hash,
+which does not detect a rewritten verdict.
 
 By default the key is generated at startup and kept only in memory, so it
 changes on every restart. A client should fetch `/key` for every run and, after
 a failed verification, fetch it once more and verify again, because the judge
 may have restarted. It should not act on `X-Judge-Key-Id` alone: the header is
-not signed and the proxy controls it. ProxPulse does this once per run from 0.6.1
-on; in older versions a restart during a run marks the rest of that run as
-modified and drops its anonymity verdicts.
+not signed and the proxy controls it. ProxPulse does this once per run from
+checker 0.6.1 on; in older checkers a restart during a run marks the rest of that
+run as modified and drops its anonymity verdicts.
 
 Set `SIGNING_KEY` to keep one key across restarts or to pin it, and always when
 several replicas sit behind one address, since each would otherwise sign with
@@ -634,6 +647,9 @@ limits; metrics are process-local and reset on restart.
 - TLS/JA3 is not inspected: TLS terminates at Caddy, Cloudflare, Render, or
   another reverse proxy.
 - Geo accuracy depends on the local database and its update cadence.
+- Hop-by-hop headers (`Proxy-Connection`, `Proxy-Authorization`, `Connection`,
+  `Keep-Alive`) never reach the judge behind Caddy or nginx, which drop them,
+  so a proxy that passes them on is not caught by them.
 - The public instances are shared and best-effort; a self-hosted instance is
   required for reliable measurements.
 

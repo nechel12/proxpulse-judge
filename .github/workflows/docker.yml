@@ -388,8 +388,8 @@ jobs:
           push-to-registry: true
 
       # Automatic redeploy of your own Render service after a fresh build.
-      # Only the fork owner holds the secret: this repo has no secret,
-      # so the step is skipped. The secret lives in the job env (not step env): a step's if
+      # Runs only where the RENDER_DEPLOY_HOOK secret is set (this repository
+      # and forks that add it). The secret lives in the job env (not step env): a step's if
       # is evaluated before its own env is applied.
       # For forks: Render dashboard → service → Settings → Deploy Hook →
       # copy the URL into Secrets → RENDER_DEPLOY_HOOK, and enable

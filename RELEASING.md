@@ -101,8 +101,9 @@ with Linux binaries.
      service.
 
 6. **Rollback**
-   - Re-deploy the previous image tag. The `:YYYYMM` and `:vX.Y.Z` tags make
-     rollback deterministic.
+   - Re-deploy the previous `:vX.Y.Z` tag, or an image digest
+     (`ghcr.io/nechel12/proxpulse-judge@sha256:…`). `:YYYYMM` is overwritten by
+     every publish within its month, so it does not pin one build.
 
 ## MaxMind downloads
 

@@ -36,6 +36,8 @@ server {
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
+    # nginx 1.25.1 or newer; older versions (1.24 in Ubuntu 24.04) write
+    # `listen 443 ssl http2;` instead of this line.
     http2 on;
     server_name check.yourdomain.com;
 

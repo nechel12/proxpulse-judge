@@ -39,10 +39,17 @@ bash scripts/load.sh http://127.0.0.1:8000 300 32
 ## Pull requests
 
 - Add or update tests for logic and HTTP changes.
-- Update `README.md` and `README.ru.md` when behavior or configuration changes.
+- Add a line under `## [Unreleased]` in `CHANGELOG.md` for every
+  user-visible change.
+- Update `README.md` and `README.ru.md` together when behavior or
+  configuration changes; a new environment variable also goes into
+  `.env.example`, and into `render.yaml` when Render needs it.
 - Do not commit secrets, `.env` files, database files, or build artifacts.
-- Keep CI green; the workflow runs formatting, clippy, tests, and a
-  container smoke/load check.
+- Keep CI green. The `docker` workflow runs formatting, clippy and tests on
+  stable and on the MSRV (`rust-version` in `Cargo.toml`), `cargo audit`,
+  actionlint, hadolint, a shell syntax check, and builds the image for a smoke
+  and load check and a Trivy scan. `scripts/smoke.sh` reads
+  `SMOKE_METRICS_TOKEN` when `/metrics` needs a token.
 
 ## Reporting security issues
 
