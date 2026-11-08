@@ -79,6 +79,9 @@
   Ctrl+C handler no longer starts a shutdown at once; `requests_total` counts
   requests the client cut off; and the compose files give the 25-second drain
   its time (`stop_grace_period: 30s`).
+- The `METRICS_TOKEN` comparison no longer tells the token's length, and rDNS
+  is skipped for more special-purpose addresses (`0.0.0.0/8`, `192.0.0.0/24`,
+  `240.0.0.0/4`, `3fff::/20`, NAT64).
 
 ## [0.6.1] — 2026-11-07
 

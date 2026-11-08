@@ -277,6 +277,11 @@ fn is_public_ip(addr: IpAddr) -> bool {
             let octets = v4.octets();
             let is_cgnat = octets[0] == 100 && (octets[1] & 0b1100_0000) == 64;
             let is_benchmark = octets[0] == 198 && (octets[1] == 18 || octets[1] == 19);
+            // 0.0.0.0/8 "this network", 192.0.0.0/24 protocol assignments,
+            // 240.0.0.0/4 reserved (broadcast included).
+            let is_reserved = octets[0] == 0
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                || octets[0] >= 240;
             !(v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
@@ -285,17 +290,22 @@ fn is_public_ip(addr: IpAddr) -> bool {
                 || v4.is_multicast()
                 || v4.is_documentation()
                 || is_cgnat
-                || is_benchmark)
+                || is_benchmark
+                || is_reserved)
         }
         IpAddr::V6(v6) => {
             let segs = v6.segments();
-            let is_doc = segs[0] == 0x2001 && segs[1] == 0x0db8;
+            // Documentation 2001:db8::/32 and 3fff::/20, NAT64 64:ff9b::/96.
+            let is_doc = (segs[0] == 0x2001 && segs[1] == 0x0db8)
+                || (segs[0] == 0x3fff && segs[1] & 0xf000 == 0);
+            let is_nat64 = segs[0] == 0x0064 && segs[1] == 0xff9b;
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || v6.is_unique_local()
                 || v6.is_unicast_link_local()
-                || is_doc)
+                || is_doc
+                || is_nat64)
         }
     }
 }
@@ -401,9 +411,16 @@ async fn readyz(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     }))
 }
 
-/// Compare without an early exit on the first differing byte.
+/// Compare secrets in constant time. Both sides are hashed first, so the
+/// comparison does not stop early on a length mismatch either, which would
+/// tell the token's length.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    use sha2::{Digest, Sha256};
+    let (a, b) = (Sha256::digest(a), Sha256::digest(b));
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 async fn metrics_ep(State(s): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -1214,6 +1231,11 @@ mod api_tests {
             "2001:db8::1",
             "fe80::1",
             "fc00::1",
+            "0.1.2.3",
+            "192.0.0.8",
+            "240.0.0.1",
+            "3fff::1",
+            "64:ff9b::808:808",
         ] {
             assert!(maybe_rdns(&state, ip, None).await.is_none(), "{ip}");
         }
