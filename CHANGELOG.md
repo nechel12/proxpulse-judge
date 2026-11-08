@@ -17,6 +17,8 @@
 - Scheduled and manual image builds rebuild the latest signed release instead
   of `main`'s HEAD, so unreleased code no longer reaches `:latest`, `:YYYYMM`
   or the Render redeploy. Forks still build their own `main`.
+- The `METRICS_TOKEN` comparison no longer tells the token's length: both
+  sides are hashed before the constant-time comparison.
 
 ### Added
 
@@ -79,12 +81,12 @@
   Ctrl+C handler no longer starts a shutdown at once; `requests_total` counts
   requests the client cut off; and the compose files give the 25-second drain
   its time (`stop_grace_period: 30s`).
-- The `METRICS_TOKEN` comparison no longer tells the token's length, and rDNS
-  is skipped for more special-purpose addresses (`0.0.0.0/8`, `192.0.0.0/24`,
-  `240.0.0.0/4`, `3fff::/20`, NAT64).
+- rDNS is skipped for more special-purpose addresses (`0.0.0.0/8`,
+  `192.0.0.0/24`, `240.0.0.0/4`, `3fff::/20`, NAT64 `64:ff9b::/32`).
 - Hosting words in a PTR name (`vps42.hosting.example`) mark a data-center
   address when the ASN organisation is unknown; `host` alone does not, being
-  common in home-line names.
+  common in home-line names, and neither does a name that also has a
+  home-line or mobile word.
 - The image's entrypoint downloads the DB-IP fallback when no database it
   knows by name is present, not when any `.mmdb` over 1 KB is; it removes
   folders left by an interrupted download, stops one in progress at once on

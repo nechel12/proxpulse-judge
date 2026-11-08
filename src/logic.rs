@@ -490,11 +490,16 @@ pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (String, TypeSignal
     let hay_org = org.unwrap_or("").to_string();
     let hay_all = format!("{} {}", hay_org, rdns.unwrap_or(""));
     // A PTR name like vps42.hosting.example says hosting too, but "host"
-    // alone is common in home-line names (host-1-2-3-4.isp.example).
+    // alone is common in home-line names (host-1-2-3-4.isp.example), and a
+    // name that also says home or mobile (dynamic-1-2-3-4.cloud.example)
+    // keeps that reading.
     let mut hosting_kw = hits(&hay_org, HOSTING_KW);
-    for kw in hits(rdns.unwrap_or(""), HOSTING_KW) {
-        if kw != "host" && !hosting_kw.contains(&kw) {
-            hosting_kw.push(kw);
+    let ptr = rdns.unwrap_or("");
+    if hits(ptr, RESIDENTIAL_KW).is_empty() && hits(ptr, MOBILE_KW).is_empty() {
+        for kw in hits(ptr, HOSTING_KW) {
+            if kw != "host" && !hosting_kw.contains(&kw) {
+                hosting_kw.push(kw);
+            }
         }
     }
     let low = hay_org.to_ascii_lowercase();
@@ -1130,6 +1135,11 @@ mod tests {
         assert_ne!(
             classify_ip(None, Some("host-1-2-3-4.isp.example")).0,
             "datacenter"
+        );
+        // A home-line word in the name keeps it residential.
+        assert_eq!(
+            classify_ip(None, Some("dynamic-1-2-3-4.cloud.example")).0,
+            "residential"
         );
     }
 

@@ -293,7 +293,8 @@ fn is_public_ip(addr: IpAddr) -> bool {
         }
         IpAddr::V6(v6) => {
             let segs = v6.segments();
-            // Documentation 2001:db8::/32 and 3fff::/20, NAT64 64:ff9b::/96.
+            // Documentation 2001:db8::/32 and 3fff::/20; NAT64 64:ff9b::/32
+            // (the well-known /96 and the local-use 64:ff9b:1::/48 in it).
             let is_doc = (segs[0] == 0x2001 && segs[1] == 0x0db8)
                 || (segs[0] == 0x3fff && segs[1] & 0xf000 == 0);
             let is_nat64 = segs[0] == 0x0064 && segs[1] == 0xff9b;
@@ -603,12 +604,19 @@ mod api_tests {
 
     const NO_GEO_DIR: &str = "/nonexistent-dir-xyz";
 
+    /// The socket address the server would attach: 127.0.0.1, or the one an
+    /// `x-test-peer` header names, so a test can play several clients.
     async fn add_connect_info(
         mut req: axum::extract::Request,
         next: axum::middleware::Next,
     ) -> Response {
-        req.extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        let peer = req
+            .headers()
+            .get("x-test-peer")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(SocketAddr::from(([127, 0, 0, 1], 12345)));
+        req.extensions_mut().insert(ConnectInfo(peer));
         next.run(req).await
     }
 
@@ -759,6 +767,22 @@ mod api_tests {
         cfg.trust_cf = true;
         let v = json(test_app_with(&cfg), spoofed("9.9.9.9")).await;
         assert_eq!(v["ip"], "127.0.0.1");
+    }
+
+    #[tokio::test]
+    async fn each_socket_address_has_its_own_rate_limit() {
+        // TRUST_PROXY=0: the key is the socket address, one bucket each.
+        let mut cfg = test_config(1, Duration::ZERO);
+        cfg.trust_proxy = false;
+        cfg.trust_cf = false;
+        let app = test_app_with(&cfg);
+        let from = |peer: &str| get_with("/ip", &[("x-test-peer", peer)]);
+        for peer in ["198.51.100.1:1000", "198.51.100.2:1000"] {
+            let res = app.clone().oneshot(from(peer)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{peer}");
+        }
+        let again = app.oneshot(from("198.51.100.1:2000")).await.unwrap();
+        assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
