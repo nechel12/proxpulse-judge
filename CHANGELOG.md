@@ -33,6 +33,10 @@
 
 ### Changed
 
+- The README is half as long. The deployment variants, the prebuilt image,
+  database updates and logs moved to `docs/deploy.md`, signed answers to
+  `docs/signing.md`, each with a Russian version; the README keeps the
+  reference tables and gains one table of trust settings per topology.
 - A `PORT`, `RATE_LIMIT_PER_MINUTE` or `RDNS_TIMEOUT` that is not a number in
   range now stops startup instead of silently becoming the default (`PORT=80a`
   served on 8000). `RDNS_TIMEOUT` is limited to 10 seconds, inside the

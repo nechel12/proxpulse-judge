@@ -6,330 +6,82 @@
 [![Release](https://img.shields.io/github/v/release/nechel12/proxpulse-judge)](https://github.com/nechel12/proxpulse-judge/releases)
 [![License](https://img.shields.io/github/license/nechel12/proxpulse-judge)](LICENSE)
 [![GHCR](https://img.shields.io/badge/ghcr.io-amd64%20%7C%20arm64-2496ED?logo=docker&logoColor=white)](https://github.com/nechel12/proxpulse-judge/pkgs/container/proxpulse-judge)
-[![MSRV](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust&logoColor=white)](Cargo.toml)
-[![Dependencies](https://deps.rs/repo/github/nechel12/proxpulse-judge/status.svg)](https://deps.rs/repo/github/nechel12/proxpulse-judge)
-[![CodeQL](https://github.com/nechel12/proxpulse-judge/actions/workflows/github-code-scanning/codeql/badge.svg?branch=main)](https://github.com/nechel12/proxpulse-judge/security/code-scanning)
-[![Security policy](https://img.shields.io/badge/security-policy-green)](SECURITY.md)
-[![Last commit](https://img.shields.io/github/last-commit/nechel12/proxpulse-judge)](https://github.com/nechel12/proxpulse-judge/commits/main)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen)](CONTRIBUTING.md)
 
-Self-hosted backend for proxy checking. A single `GET /judge` request returns
-the proxy exit IP, its anonymity level, geo and ASN from **local** `.mmdb`
-files, the IP type, and a hash of fixed content for tamper checks.
-
-Stack: **Rust + axum + tokio**, databases in RAM, lookup cache. No third-party
-HTTP APIs in the request path; a configurable per-client rate limiter
-(`RATE_LIMIT_PER_MINUTE`, 6000/min by default). The service is a single binary
-on `debian:trixie-slim`; the default image also includes `curl` and `gzip` for
-the optional database download fallback, the Render image does not.
+A self-hosted proxy judge for [ProxPulse](https://github.com/nechel12/proxpulse)
+and other checkers. One `GET /judge` through a proxy returns its exit IP,
+anonymity (`elite`, `anonymous`, `transparent`), geo and ASN from **local**
+`.mmdb` files, the IP type, and a hash of fixed content for tamper checks,
+with an Ed25519 signature. A single Rust binary (axum, tokio); no third-party
+API is called while answering.
 
 > Status: pre-1.0. The documented HTTP endpoints are intended to be stable,
 > but behavior may change in minor releases.
 
 ## Contents
 
-- [Quickstart](#quickstart) · [Prebuilt image and binaries](#prebuilt-image-and-binaries)
-- Deployment: [A — Caddy](#variant-a--caddy-reverse-proxy) (or [nginx](#nginx-instead-of-caddy)) ·
-  [B — Cloudflare Tunnel](#variant-b--cloudflare-tunnel-no-caddy-no-open-ports) ·
-  [C — Render](#variant-c--render-free-hosting-no-vps)
+- [Quickstart](#quickstart) · [Deployment](#deployment)
 - [Endpoints](#endpoints) · [How verdicts are decided](#how-verdicts-are-decided) ·
   [Using it from the checker](#using-it-from-the-checker)
-- [Public instances](#public-instances) · [Databases](#databases)
-- [Configuration](#configuration) · [Monitoring](#monitoring) ·
-  [Troubleshooting](#troubleshooting)
-- [Limitations](#limitations) · [Security](#security) ·
-  [Development](#development)
+- [Public instances](#public-instances) · [Databases](#databases) ·
+  [Configuration](#configuration)
+- [Monitoring](#monitoring) · [Troubleshooting](#troubleshooting) ·
+  [Limitations](#limitations) · [Security](#security)
+- Guides: [deployment](docs/deploy.md) · [signed answers](docs/signing.md)
 
 ## Quickstart
-
-One command with [Docker](https://docs.docker.com/get-docker/) and the
-prebuilt image, which carries the DB-IP Lite databases:
 
 ```sh
 docker run -d --name proxpulse-judge -p 8000:8000 ghcr.io/nechel12/proxpulse-judge:latest
 curl http://127.0.0.1:8000/judge
 ```
 
-Asked directly from the same machine, the judge answers with the address it
-sees, which is Docker's gateway (`"ip": "172.17.0.1"`), so `geo` says
-`"error": "not found"` (a private address is in no database), `ip_type` is
-`unknown` and `anonymity` is `elite`. That is the expected answer for a local
-request; through a proxy, the answer shows the proxy's exit, as in the
-[example below](#endpoints). The checker needs the judge on a public address:
+The image carries the DB-IP Lite databases. Asked from the same machine, the
+judge sees Docker's gateway (`"ip": "172.17.0.1"`): `geo` says
+`"error": "not found"`, `ip_type` is `unknown` and `anonymity` is `elite`.
+That is right for a local request; through a proxy the answer describes the
+proxy's exit, as in the [example below](#endpoints).
 
-| Variant | Needs | Anonymity verdict |
-|---|---|---|
-| [A — Caddy or nginx on a VPS](#variant-a--caddy-reverse-proxy) | a domain, ports 80 and 443 | yes |
-| [B — Cloudflare Tunnel](#variant-b--cloudflare-tunnel-no-caddy-no-open-ports) | a domain on Cloudflare, no open ports | yes, with Always Use HTTPS off |
-| [C — Render](#variant-c--render-free-hosting-no-vps) | a free account, no server | no: Render answers HTTPS only |
-
-From source, with your own database files in `./geo` (needs `bash`, `curl`
-and `gzip` for the download script; [Rust](https://rustup.rs/) 1.88 or newer
-for a build without Docker):
+From source, with your own databases in `./geo` (the download script needs
+`bash`, `curl` and `gzip`; a build without Docker needs
+[Rust](https://rustup.rs/) 1.88 or newer):
 
 ```sh
 git clone https://github.com/nechel12/proxpulse-judge.git
 cd proxpulse-judge
-bash scripts/download-dbip.sh   # downloads City + ASN, no keys needed
+bash scripts/download-dbip.sh   # City + ASN, no keys needed
 cp .env.example .env
 docker compose up -d --build
 ```
 
-### Prebuilt image and binaries
+Release binaries, image tags and their verification are described in
+[docs/deploy.md](docs/deploy.md#prebuilt-image-and-binaries).
 
-CI publishes a multi-arch (`linux/amd64`, `linux/arm64`) image with embedded
-DB-IP Lite databases to GHCR:
+## Deployment
 
-```sh
-docker pull ghcr.io/nechel12/proxpulse-judge:latest
-```
+A checker needs the judge on a public address, and for an anonymity verdict
+`/judge` must answer **plain HTTP**: inside an HTTPS tunnel a proxy cannot
+add headers.
 
-`:latest` is always the latest signed release, never unreleased code from
-`main`. Monthly scheduled builds rebuild that release with fresh databases and
-update `:latest` and `:YYYYMM`; signed `vX.Y.Z` release tags additionally
-publish `:vX.Y.Z`, which is never overwritten. Every image passes a smoke test with the baked databases
-and a Trivy scan before it is pushed, and carries a signed build provenance
-attestation:
+| Variant | Needs | Anonymity verdict |
+|---|---|---|
+| [A — Caddy or nginx on a VPS](docs/deploy.md#variant-a--caddy-reverse-proxy) | a domain, ports 80 and 443 | yes |
+| [B — Cloudflare Tunnel](docs/deploy.md#variant-b--cloudflare-tunnel-no-caddy-no-open-ports) | a domain on Cloudflare, no open ports | yes, with Always Use HTTPS off |
+| [C — Render](docs/deploy.md#variant-c--render-free-hosting-no-vps) | a free account, no server | no: Render answers HTTPS only |
 
-```sh
-gh attestation verify oci://ghcr.io/nechel12/proxpulse-judge:latest --owner nechel12
-```
+The trust settings must match what stands in front of the judge. They decide
+where the client address comes from; a wrong one lets any client spoof its
+IP, geo and rate-limit key:
 
-The images contain no MaxMind data. On a VPS,
-[`docker-compose.ghcr.yml`](docker-compose.ghcr.yml) runs the image with the
-same limits as `docker-compose.yml`, but without the `./geo` volume, which
-would hide the baked databases:
+| In front of the judge | `TRUST_PROXY` | `TRUST_CF` |
+|---|---|---|
+| nothing (`docker run -p`, the default) | `0` | `0` |
+| Caddy or nginx on the same host (A) | `1` | `0` |
+| Cloudflare, then Caddy or nginx | `1` | `1` |
+| Cloudflare Tunnel (B), Render (C) | `1` | `1` (`render.yaml` sets both) |
 
-```sh
-cp .env.example .env
-docker compose -f docker-compose.ghcr.yml up -d
-# update to a new release or the monthly databases:
-docker compose -f docker-compose.ghcr.yml pull && docker compose -f docker-compose.ghcr.yml up -d
-```
-
-With your own MaxMind or DB-IP files, the default `Dockerfile` target is built
-and `./geo` is mounted (`docker-compose.yml`), as described below.
-
-Each [GitHub release](https://github.com/nechel12/proxpulse-judge/releases)
-also ships static Linux binaries (`x86_64`, `aarch64`) with `SHA256SUMS` and
-attestations. An archive holds the binary, `.env.example` and
-`download-dbip.sh`. The binary reads no `.env` file: its settings come from
-the environment, for example from a systemd unit:
-
-```sh
-GEO_DIR=/opt/proxpulse-judge/geo JUDGE_BIN=./proxpulse-judge bash download-dbip.sh
-```
-
-```ini
-# /etc/systemd/system/proxpulse-judge.service
-[Service]
-ExecStart=/opt/proxpulse-judge/proxpulse-judge
-Environment=GEO_DIR=/opt/proxpulse-judge/geo TRUST_PROXY=1 BIND_ADDR=127.0.0.1
-DynamicUser=yes
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-> [!IMPORTANT]
-> The image defaults to `TRUST_PROXY=0` and `TRUST_CF=0`: the client IP is the
-> socket address. Both values must match the deployment topology (`render.yaml`
-> already sets them to `1` for Render). `TRUST_CF=1` is safe only when every
-> request reaches the container through Cloudflare: otherwise any client can
-> spoof its IP, geo and rate-limit key with a `CF-Connecting-IP` header.
-
-## Variant A — Caddy (reverse proxy)
-
-A **dedicated domain** is required (no HTTPS certificate is issued without
-one). The subdomain can be anything, e.g. `check.yourdomain.com`: an
-**A-record** for the subdomain is created in the registrar's DNS panel,
-pointing at the server IP, and ports **80 and 443** must face the internet.
-Example in `Caddyfile.example`:
-
-```caddy
-(judge) {
-    reverse_proxy 127.0.0.1:8000 {
-        trusted_proxies 0.0.0.0/0 ::/0
-    }
-}
-
-check.yourdomain.com {
-    import judge
-}
-
-http://check.yourdomain.com {
-    @plain path /judge /content /headers /ip
-    handle @plain {
-        import judge
-    }
-    handle {
-        redir https://{host}{uri} 308
-    }
-}
-```
-
-Caddy issues a Let's Encrypt certificate automatically. The `http://` block
-keeps `/judge`, `/content`, `/headers`, and `/ip` on plain HTTP and redirects
-everything else, `/key` included, to HTTPS: anonymity is only visible over
-plain HTTP (see [Signed answers](#signed-answers)), and without that block
-Caddy redirects all of port 80. Verification:
-
-```sh
-curl https://check.yourdomain.com/healthz
-curl -s http://check.yourdomain.com/judge | head -c 200; echo   # JSON, not a redirect
-```
-
-`Caddyfile.example` enables `trusted_proxies`: since Caddy 2.5 the incoming
-`X-Forwarded-For` from the checked proxy is dropped by default, so the judge
-would not see a real-IP leak passed via XFF. Trusting XFF from all clients is
-safe only because the judge listens on `127.0.0.1` and is reachable solely
-through Caddy. `TRUST_CF=0` (the default) is required for this variant: there
-is no Cloudflare here, and CF headers are trivially forgeable. With it the
-judge never takes the client address from `CF-Connecting-IP` or
-`True-Client-IP`; it only searches them for the checker's real IP, like any
-other header, so the examples pass them through.
-
-If Cloudflare sits **in front of** Caddy, `trusted_proxies` is set to Cloudflare's ranges instead of `0.0.0.0/0`, ports
-80/443 are restricted to Cloudflare IPs (or Authenticated Origin Pulls is
-used, since `trusted_proxies` only governs `X-Forwarded-*`, not
-`CF-Connecting-IP`), and both `TRUST_CF=1` and `TRUST_PROXY=1` are required.
-
-### nginx instead of Caddy
-
-[`nginx.conf.example`](nginx.conf.example) is the equivalent configuration,
-with the same plain-HTTP `location` for `/judge`, `/content`, `/headers`, and
-`/ip` on port 80. The important parts:
-
-```nginx
-location ~ ^/(judge|content|headers|ip)$ { ... }   # port 80, no redirect
-proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-```
-
-nginx appends the connecting address to the proxy's `X-Forwarded-For`, so
-`TRUST_PROXY=1` works as with Caddy. `X-Real-IP`, `Via`, and `Forwarded` are
-**not** added there (many nginx templates do): the judge treats them as proxy
-telltales, and every check would come out `anonymous`. If a configuration
-requires them, they are listed in `EDGE_HEADERS` (e.g.
-`EDGE_HEADERS=x-real-ip`) so they are not attributed to the checked proxy.
-
-## Variant B — Cloudflare Tunnel (no Caddy, no open ports)
-
-```sh
-cloudflared tunnel --url http://127.0.0.1:8000
-```
-
-or no config-file commands at all — via the Cloudflare website:
-**Zero Trust → Networks → Tunnels → Create a tunnel**; a tunnel name is
-chosen, and the **Public Hostname** tab contains: subdomain `check`, domain
-`yourdomain.com` (together `check.yourdomain.com`), service
-`http://proxpulse-judge:8000` (container on the shared network; details below) or
-`http://127.0.0.1:8000` (cloudflared on the host). The token from the website
-is passed into the connector container:
-
-```sh
-docker run -d --name cf-tunnel --restart unless-stopped \
-  --network proxpulse-net \
-  cloudflare/cloudflared:latest tunnel --no-autoupdate run --token <TOKEN>
-```
-
-or a named tunnel with DNS on `check.yourdomain.com` and ingress:
-
-```yaml
-tunnel: <id>
-credentials-file: /root/.cloudflared/<id>.json
-ingress:
-  - hostname: check.yourdomain.com
-    service: http://127.0.0.1:8000
-  - service: http_status:404
-```
-
-> Important: if cloudflared runs **in docker**, `localhost` inside its
-> container is itself, and the name `proxpulse-judge` is only visible on the
-> shared network. So the tunnel container must sit on the same network as
-> judge — the `proxpulse-net` network from `docker-compose.yml` is created
-> automatically. The command above starts the tunnel on it already; a tunnel
-> started without `--network proxpulse-net` is connected like this:
->
-> ```sh
-> docker network connect proxpulse-net cf-tunnel
-> docker network inspect proxpulse-net --format '{{range .Containers}}{{.Name}} {{end}}'
-> # both must be visible: proxpulse-judge and cf-tunnel
-> ```
->
-> with ingress/service pointing to `http://proxpulse-judge:8000`.
-> cloudflared on the host itself simply goes to `http://127.0.0.1:8000`.
-
-`TRUST_CF=1` and `TRUST_PROXY=1` are required explicitly in this variant;
-`TRUST_CF` defaults to `0`, which is safe for Caddy/VPS. The service takes
-the real IP from `CF-Connecting-IP` (set by Cloudflare itself, takes
-priority over `X-Forwarded-For`). Known Cloudflare infrastructure headers are
-excluded from anonymity detection, while unknown `cf-*` headers are still checked
-for `direct_ip` leaks. Verification:
-
-```sh
-MYIP=$(curl -s https://api.ipify.org)
-curl -s "http://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
-# expect "anonymity":"elite"
-```
-
-For anonymity the hostname must answer plain HTTP: Cloudflare's **Always Use
-HTTPS** (SSL/TLS → Edge Certificates) stays off for it, otherwise every HTTP
-request is redirected and the checker gets no anonymity verdict.
-
-## Variant C — Render (free hosting, no VPS)
-
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/nechel12/proxpulse-judge)
-
-A ready image with embedded DB-IP Lite rebuilds itself every month
-(`.github/workflows/docker.yml` → `ghcr.io/nechel12/proxpulse-judge:latest`),
-no disk needed. The button creates the service from `render.yaml` with
-a free `https://<name>.onrender.com` domain. The resulting URL is used in
-the checker. No Cloudflare Tunnel is needed in this setup: Render
-provides both TLS and the domain. Render redirects all plain HTTP to HTTPS, so
-a Render instance gives IP, geo, and IP type but **no anonymity verdict**; for
-that, variant A or B is needed.
-
-Free-plan notes:
-
-- The service sleeps after 15 minutes without traffic; waking up takes
-  about a minute. The first check after idle may partially fail on
-  timeouts — repeating it is sufficient. A single service approximately
-  matches the free 750 h/month allowance.
-- The filesystem is ephemeral, but that is fine: the databases are
-  baked into the image.
-- `TRUST_PROXY=1` and `TRUST_CF=1` are required (Render traffic passes
-  through Cloudflare; the real IP is taken from `CF-Connecting-IP`).
-  `render.yaml` sets both; the image itself defaults to `0`, so a service
-  created by hand needs both variables in the Render dashboard
-  (Environment). The `PORT` variable is provided by Render and must not
-  be overridden.
-- `render.yaml` also generates a random `METRICS_TOKEN`, so `/metrics` of a
-  public instance is not open; the token is under Environment.
-- The image carries DB-IP Lite only: the GeoLite2 EULA restricts public
-  redistribution, so MaxMind data is not baked into the published image.
-  MaxMind requires the VPS + volume variant above.
-
-Database updates (the image rebuilds on the 3rd of every month):
-
-1. **Fork + auto-hook.** A fork of the repository is created, workflows are
-   enabled in the fork's Actions tab (disabled by default), a
-   `RENDER_DEPLOY_HOOK` secret is added (Render dashboard → service →
-   Settings → Deploy Hook), and the fork's `render.yaml` points at its own
-   `ghcr.io/<owner>/proxpulse-judge:latest`. Fresh images are then published
-   to the fork's GHCR and trigger redeploys automatically. A fork builds its
-   own `main`, not the latest release, so it is kept in sync (Sync fork).
-   Limitation: the schedule is disabled after 60 days without activity in the
-   fork — the workflow is run manually from time to time (Run workflow).
-2. **Manually.** Render dashboard → service → Manual Deploy →
-   Deploy latest reference. Geo data changes slowly, so manual updates
-   are usually sufficient.
-3. **Own scheduler, no fork.** The service can track
-   `ghcr.io/nechel12/proxpulse-judge:latest` directly while any external
-   scheduler (own server, cron-job.org, etc.) calls the deploy hook monthly.
-
-The image is compatible with other container hostings: `$PORT`
-passthrough and `/healthz` as the health check are required.
+`TRUST_CF=1` is safe only when every request comes through Cloudflare. A
+reverse proxy that adds `X-Real-IP`, `Via` or `Forwarded` itself lists them in
+`EDGE_HEADERS`, or every proxy looks `anonymous`.
 
 ## Endpoints
 
@@ -342,7 +94,7 @@ passthrough and `/healthz` as the health check are required.
 | GET | `/geo` | `{"ip", "geo", "source", "attribution"}` — country/city/ASN from local DBs |
 | GET | `/type` | `{"ip", "ip_type", "signals"}` — IP type with reasoning |
 | GET | `/content` | fixed bytes — integrity reference |
-| GET | `/judge?direct_ip=...&nonce=...` | everything at once + `anonymity`, `content_sha256`; signed, see [Signed answers](#signed-answers) |
+| GET | `/judge?direct_ip=...&nonce=...` | everything at once + `anonymity`, `content_sha256`; signed, see [Signed answers](docs/signing.md#signed-answers) |
 | GET | `/key` | `{"alg", "key_id", "public_key"}` — the public key that signs `/judge` |
 | GET | `/healthz` | `{"ok": true}` — liveness probe |
 | GET | `/readyz` | `{"ok", "geo_ready", "geo_sources"}` — readiness |
@@ -402,16 +154,6 @@ Example `/judge` response through an anonymous proxy, with DB-IP databases:
 | `anonymous` | No leak, but the proxy reveals itself: `X-Forwarded-For` entries of its own (even `unknown`; with `TRUST_PROXY=0`, even an empty header), or a header that only proxies add: `Via`, `Forwarded`, `Forwarded-For`, `Forwarded-For-IP`, `X-Forwarded`, any other `X-Forwarded-*` and `X-Real-Port` when nothing stands in front of the judge (`TRUST_PROXY=0`), `X-Real-IP`, `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`, `X-Remote-IP`, `X-Remote-Addr`, `Coming-From`, `X-Coming-From`, `Xroxy-Connection`, `Proxy-*`, `X-Proxy*`. |
 | `elite` | Neither: the request looks like a direct one. |
 
-```mermaid
-flowchart TD
-    A[Request through the checked proxy] --> B["Removing what the deployment edge added:<br/>XFF hops (TRUST_PROXY), CF headers (TRUST_CF), EDGE_HEADERS"]
-    B --> C{"direct_ip in XFF<br/>or in any header value?"}
-    C -- yes --> T[transparent]
-    C -- no --> D{"XFF entries left, or Via / Forwarded /<br/>X-Real-IP / X-Client-IP / Proxy-* and similar?"}
-    D -- yes --> N[anonymous]
-    D -- no --> E[elite]
-```
-
 Without `direct_ip` a leak cannot be told apart from an ordinary forwarded
 address, so the result is never worse than `anonymous`. `ip_type` is `mobile`,
 `datacenter`, `business`, `residential`, or `unknown`, derived from the ASN
@@ -420,83 +162,20 @@ organization (and the PTR record when the organization is unknown);
 
 ## Using it from the checker
 
-How [ProxPulse](https://github.com/nechel12/proxpulse), the checker, uses the
-judge; its README describes the details.
+[ProxPulse](https://github.com/nechel12/proxpulse) learns its own IP directly
+(`api.ipify.org`, or this judge's `/ip` over HTTPS), then asks
+`GET /judge?direct_ip=<its IP>&nonce=<random>` through each proxy. It compares
+`content_sha256` with `/content` fetched directly for integrity, and a bare
+`GET /generate_204` is the cheapest liveness check. There is no rDNS
+parameter: the server resolves PTR itself, only when the ASN organization is
+unknown, at most 16 at a time, cached for an hour.
 
-1. The checker's own IP (`direct_ip`), learned directly, not through a proxy:
-   ProxPulse asks `api.ipify.org`, and this judge's `GET /ip` over HTTPS when
-   ipify does not answer. Without it, a leak cannot be seen, so it shows no
-   anonymity verdict.
-2. `GET /judge?direct_ip=<checker-ip>` through a proxy — the `anonymity` field:
-   `elite` (leaks nothing), `anonymous` (proxy visible, IP hidden),
-   `transparent` (real IP leaked).
-3. Integrity: bytes from `GET /content` directly and through the proxy are
-   compared (or `content_sha256` from `/judge`).
-4. Geo and type are already inside `/judge`. There is no rDNS parameter:
-   the server resolves PTR itself, only when the ASN org is unknown (otherwise
-   it changes nothing), at most 16 resolutions in parallel, answers cached
-   for an hour.
-5. A liveness check is just `GET /generate_204` (empty 204, the cheapest request).
-
-### Signed answers
-
-Anonymity can only be judged over plain HTTP: inside an HTTPS tunnel the
-proxy cannot add headers. Over HTTP it could also rewrite the answer, for
-example to claim `elite`. So every successful (`200`) `/judge` answer carries
-an Ed25519 signature in `X-Judge-Signature` (base64) and the key id in
-`X-Judge-Key-Id`. The signed message is
-
-```text
-proxpulse-judge-v1\n<nonce>\n<direct_ip>\n<response body>
-```
-
-with the `nonce` (8–64 characters of `A-Z a-z 0-9 _ -`, otherwise ignored)
-and `direct_ip` query values after URL decoding; absent values are empty, and a
-`direct_ip` containing a line feed counts as absent. ProxPulse sends a random
-nonce for every checked proxy and fetches `/key` directly, not through a proxy,
-so the checked proxy cannot swap the key, and an answer it rewrites or replays
-fails verification.
-
-Signatures matter only where `/judge` answers plain HTTP. The Caddy and nginx
-examples serve `/judge`, `/content`, `/headers`, and `/ip` over plain HTTP on
-port 80 and redirect everything else, `/key` included, to HTTPS. Render
-redirects all HTTP to HTTPS, which hides the request from the judge, so
-ProxPulse gets no anonymity verdict from it. (Before checker 0.6.1, its
-HTTP-only mode reported one from the HTTPS answer, usually a false `elite`
-whose signature still verified.) Signatures need judge 0.6.1 or newer; an older
-judge answers `/key` with `404` and is treated as unsigned.
-
-The key is only as trustworthy as the channel that delivered it. Over HTTPS,
-TLS authenticates it. Over plain HTTP, a direct request only keeps out a checked
-proxy that is not also on the direct path: anyone on that path (local network,
-ISP, VPN) can substitute the key and forge answers, and a client that falls back
-from HTTPS to HTTP can be forced onto it. Serve `/key` over HTTPS, and pin a
-fixed key in the client when that is not enough. ProxPulse falls back to HTTP,
-then shows a note saying so (for a key and for a `404` alike), follows no
-redirects for `/key`, and does not pin the key. From checker 0.6.1 on, when
-`/key` gets no clear answer it reports no integrity result rather than `ok`. A
-`404` means an unsigned judge, whose answers it only compares by content hash,
-which does not detect a rewritten verdict.
-
-By default the key is generated at startup and kept only in memory, so it
-changes on every restart. A client should fetch `/key` for every run and, after
-a failed verification, fetch it once more and verify again, because the judge
-may have restarted. It should not act on `X-Judge-Key-Id` alone: the header is
-not signed and the proxy controls it. ProxPulse does this once per run from
-checker 0.6.1 on; in older checkers a restart during a run marks the rest of that
-run as modified and drops its anonymity verdicts.
-
-Set `SIGNING_KEY` to keep one key across restarts or to pin it, and always when
-several replicas sit behind one address, since each would otherwise sign with
-its own key:
-
-```sh
-openssl rand -base64 32   # any 32 random bytes: put the output in SIGNING_KEY
-```
-
-The public key is derived from it. Keep the seed secret; a new seed changes
-the key. Clients that fetch `/key` pick it up at their next run; a client that
-pinned the key must be updated.
+Over plain HTTP a proxy could also rewrite the answer, so every `200` from
+`/judge` is signed with Ed25519 over the body, the `nonce` and `direct_ip`;
+the public key is at `/key`, to be fetched directly and over HTTPS. The key is
+generated at startup unless `SIGNING_KEY` fixes it. What is signed, how a
+client should verify it, and when to pin the key:
+[docs/signing.md](docs/signing.md).
 
 ## Public instances
 
@@ -519,63 +198,27 @@ and only for unknown ASN orgs; no client-side requests are needed.
 
 ## Databases
 
-The `./geo` directory is mounted into the container read-only. The service
-finds files by itself:
+The service finds the files in `GEO_DIR` (`./geo`, mounted read-only by
+`docker-compose.yml`) by itself: `GeoLite2-City.mmdb` or
+`dbip-city-lite.mmdb`, `GeoLite2-ASN.mmdb` or `dbip-asn-lite.mmdb`, and a
+Country database as the fallback when there is no City. Without files the geo
+fields are empty (`"error": "no db"`) and everything else works.
 
-- `GeoLite2-City.mmdb` or `dbip-city-lite.mmdb`
-- `GeoLite2-ASN.mmdb` or `dbip-asn-lite.mmdb`
-- `GeoLite2-Country.mmdb` or `dbip-country-lite.mmdb` — fallback if there is no City
+Each database has its own terms, and its attribution must be shown wherever
+its results are:
 
-Without files, geo fields come back empty (`"error": "no db"`); the type
-is usually `unknown` (rDNS may still provide a hint); everything else
-works.
+- **DB-IP Lite** — [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/),
+  attribution `IP Geolocation by DB-IP` linking to <https://db-ip.com>;
+  updated monthly; baked into the published image.
+- **MaxMind GeoLite2** — a free account and key, the
+  [GeoLite EULA](https://www.maxmind.com/en/geolite/eula); attribution
+  `This product includes GeoLite2 Data created by MaxMind, available from
+  https://www.maxmind.com`. Never in the published image.
 
-### Database licenses (important)
-
-The files themselves are not in the repository — they are downloaded
-separately, and each database has its own terms:
-
-- **DB-IP Lite** — [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
-  Attribution is required — an `IP Geolocation by DB-IP` link
-  to <https://db-ip.com> wherever results from the database are shown.
-  Updated **monthly**. Details: <https://db-ip.com/db/lite.php>
-- **MaxMind GeoLite2** (City / ASN / Country) — needs a free account
-  and key. Usage is governed by the
-  [GeoLite EULA](https://www.maxmind.com/en/geolite/eula) (incorporates aspects
-  of [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)).
-  Attribution is required: `This product includes GeoLite2 Data
-  created by MaxMind, available from https://www.maxmind.com`.
-
-### Do databases update themselves? No
-
-`scripts/download-dbip.sh` (no keys) or `scripts/download-geolite2.sh`
-(needs `MAXMIND_LICENSE_KEY` from a free account) are manual: after download,
-files land in `./geo`, and a container **restart is required** (the geo cache
-lives in memory, new files are not picked up without a restart). For
-automation — monthly cron + restart:
-
-```cron
-0 4 3 * * cd /opt/proxpulse-judge && bash scripts/download-dbip.sh >/tmp/dbip.log 2>&1 && docker compose restart judge
-```
-
-`docker-compose` mounts `./geo` **read-only**, so the entrypoint cannot
-write there: for compose, the databases are downloaded on the host
-(`bash scripts/download-dbip.sh`), or an image with baked databases is used
-(Render). The entrypoint fallback only works when `GEO_DIR` is writable
-(e.g. `docker run` without a read-only mount); otherwise it logs a warning
-and starts without geo. Custom files (MaxMind or DB-IP) take precedence —
-the fallback only fires when no valid `.mmdb` is present.
-
-## Maintenance: logs
-
-The service logs to stdout. Docker's `json-file` driver stores them with no
-size limit by default, so `docker-compose.yml` sets limits (`max-size: 10m`,
-`max-file: 3` — up to ~30 MB per container). With a compose setup no further
-configuration is needed. The compose service also runs with a read-only root
-filesystem, no capabilities, `no-new-privileges`, and a 512 MB memory limit.
-
-Without Docker the binary logs to stdout too: under systemd, journald keeps
-and rotates the log (`journalctl -u proxpulse-judge`).
+The databases do not update themselves: `scripts/download-dbip.sh` or
+`scripts/download-geolite2.sh` (with `MAXMIND_LICENSE_KEY`), then a restart.
+A monthly cron line and the image's own fallback are in
+[docs/deploy.md](docs/deploy.md#do-databases-update-themselves-no).
 
 ## Configuration
 
@@ -590,7 +233,7 @@ and rotates the log (`journalctl -u proxpulse-judge`).
 | `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, seconds, from `0` (rDNS off) to `10` |
 | `RATE_LIMIT_PER_MINUTE` | `6000` | token-bucket burst and sustained requests per client per minute (an IPv4 address or an IPv6 `/64`), `0` — no limit |
 | `METRICS_TOKEN` | empty | when set, `/metrics` requires `Authorization: Bearer <token>`; send it over HTTPS only |
-| `SIGNING_KEY` | empty | fixed key for signing `/judge` answers: 32 bytes in base64 (`openssl rand -base64 32`); empty — a key generated at startup, see [Signed answers](#signed-answers); a malformed key stops startup |
+| `SIGNING_KEY` | empty | fixed key for signing `/judge` answers: 32 bytes in base64 (`openssl rand -base64 32`); empty — a key generated at startup, see [Signed answers](docs/signing.md#signed-answers); a malformed key stops startup |
 | `RUST_LOG` | `info` | log level |
 
 `TRUST_PROXY` and `TRUST_CF` accept `1`/`0`, `true`/`false`, `yes`/`no`,
@@ -667,35 +310,22 @@ the reported IP/geo and the rate-limit key.
 ## Development
 
 ```sh
-cargo test        # logic, geo (real .mmdb fixtures), API, server limits
+cargo test
 PORT=8000 GEO_DIR=./geo TRUST_PROXY=0 cargo run
-
-scripts/smoke.sh http://127.0.0.1:8000
-scripts/load.sh http://127.0.0.1:8000 300 32
+bash scripts/smoke.sh http://127.0.0.1:8000
 ```
 
-Structure: `src/main.rs` (startup, healthcheck), `src/config.rs` (environment),
-`src/server.rs` (connections, timeouts, graceful shutdown), `src/app.rs`
-(routes, middleware, handlers), `src/ratelimit.rs`, `src/metrics.rs`,
-`src/geo.rs` (`.mmdb` pool), `src/logic.rs` (anonymity, IP type, fixed
-content). The minimum supported Rust version is 1.88; CI checks it.
+The code layout, the checks a change must pass and the release process are in
+[CONTRIBUTING.md](CONTRIBUTING.md) and [RELEASING.md](RELEASING.md); release
+notes are in [CHANGELOG.md](CHANGELOG.md). Bug reports and pull requests are
+welcome under the [Code of Conduct](CODE_OF_CONDUCT.md); security issues go
+through [SECURITY.md](SECURITY.md), not a public issue.
 
 ## Related projects
 
 - [proxpulse](https://github.com/nechel12/proxpulse) — desktop proxy
   checker (Tauri 2) that uses the judge as its check backend; the public
   instance above is embedded in it by default.
-
-## Contributing
-
-Bug reports and pull requests are welcome. The development workflow is
-described in [CONTRIBUTING.md](CONTRIBUTING.md). Participation implies
-agreement with the [Code of Conduct](CODE_OF_CONDUCT.md). Before a change is
-sent, the checks `cargo fmt --check`,
-`cargo clippy --all-targets -- -D warnings`, and `cargo test` must pass.
-Security issues should be reported through [SECURITY.md](SECURITY.md), not a
-public issue. Release notes live in [CHANGELOG.md](CHANGELOG.md); maintainers
-can follow [RELEASING.md](RELEASING.md).
 
 ## License
 

@@ -36,6 +36,16 @@ bash scripts/smoke.sh http://127.0.0.1:8000
 bash scripts/load.sh http://127.0.0.1:8000 300 32
 ```
 
+Code layout: `src/main.rs` (startup, `--healthcheck`, `--check-geo`),
+`src/config.rs` (environment), `src/server.rs` (connections, timeouts,
+graceful shutdown), `src/app.rs` (routes, middleware, handlers),
+`src/logic.rs` (anonymity, IP type, fixed content), `src/geo.rs` (`.mmdb`
+pool), `src/ratelimit.rs`, `src/metrics.rs`, `src/sign.rs` (signatures). The
+minimum supported Rust version is 1.88; CI checks it.
+
+Documentation comes in pairs: `README.md` with `README.ru.md`, and each
+`docs/<page>.md` with `docs/<page>.ru.md`. A change to one changes the other.
+
 ## Pull requests
 
 - Add or update tests for logic and HTTP changes.
