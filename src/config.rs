@@ -39,9 +39,15 @@ impl Config {
     fn from_lookup(lookup: impl Fn(&str) -> Result<String, env::VarError>) -> Result<Self, String> {
         let get = |name: &str| parse_var(name, lookup(name));
         let trust_proxy = parse_flag("TRUST_PROXY", get("TRUST_PROXY")?.as_deref())?;
-        // CF headers are proxy headers too: without TRUST_PROXY the service
-        // must resolve the IP from the socket, never from client headers.
-        let trust_cf = trust_proxy && parse_flag("TRUST_CF", get("TRUST_CF")?.as_deref())?;
+        // Parsed either way, so a typo stops startup even when it has no
+        // effect yet. CF headers are proxy headers too: without TRUST_PROXY
+        // the service must resolve the IP from the socket, never from client
+        // headers.
+        let trust_cf = parse_flag("TRUST_CF", get("TRUST_CF")?.as_deref())?;
+        if trust_cf && !trust_proxy {
+            tracing::warn!("TRUST_CF is ignored without TRUST_PROXY=1 (no reverse proxy in front)");
+        }
+        let trust_cf = trust_proxy && trust_cf;
         let mut edge_headers = parse_edge_headers(get("EDGE_HEADERS")?.as_deref())?;
         if !trust_proxy && !edge_headers.is_empty() {
             tracing::warn!(
@@ -50,15 +56,17 @@ impl Config {
             edge_headers.clear();
         }
         Ok(Self {
-            port: parse_port(get("PORT")?.as_deref()),
+            port: parse_port(get("PORT")?.as_deref())?,
             bind: parse_bind(get("BIND_ADDR")?.as_deref())?,
             geo_dir: get("GEO_DIR")?.unwrap_or_else(|| "/app/geo".to_string()),
             trust_proxy,
             trust_cf,
-            rdns_timeout: parse_rdns_timeout(get("RDNS_TIMEOUT")?.as_deref()),
-            rate_per_minute: get("RATE_LIMIT_PER_MINUTE")?
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(6000),
+            rdns_timeout: parse_rdns_timeout(get("RDNS_TIMEOUT")?.as_deref())?,
+            rate_per_minute: parse_number(
+                "RATE_LIMIT_PER_MINUTE",
+                get("RATE_LIMIT_PER_MINUTE")?.as_deref(),
+                6000,
+            )?,
             edge_headers,
             metrics_token: get("METRICS_TOKEN")?.filter(|t| !t.trim().is_empty()),
             signer: parse_signer(get("SIGNING_KEY")?.as_deref())?,
@@ -66,8 +74,26 @@ impl Config {
     }
 }
 
-fn parse_port(raw: Option<&str>) -> u16 {
-    raw.and_then(|v| v.parse().ok()).unwrap_or(8000)
+/// A number setting: unset or blank takes the default, anything else must
+/// parse, so a typo stops startup instead of silently becoming the default.
+fn parse_number<T: std::str::FromStr>(
+    name: &str,
+    raw: Option<&str>,
+    default: T,
+) -> Result<T, String> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(default),
+        Some(v) => v
+            .parse()
+            .map_err(|_| format!("{name}: not a valid number: {v:?}")),
+    }
+}
+
+fn parse_port(raw: Option<&str>) -> Result<u16, String> {
+    match parse_number("PORT", raw, 8000)? {
+        0 => Err("PORT: expected 1 to 65535, got 0".to_string()),
+        port => Ok(port),
+    }
 }
 
 /// Where `--healthcheck` connects: loopback for a wildcard bind, otherwise
@@ -78,7 +104,10 @@ pub fn probe_addr() -> Option<SocketAddr> {
         IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
         ip => ip,
     };
-    Some(SocketAddr::new(ip, parse_port(var("PORT").as_deref())))
+    Some(SocketAddr::new(
+        ip,
+        parse_port(var("PORT").as_deref()).ok()?,
+    ))
 }
 
 /// `1/true/yes/on` or `0/false/no/off` (any case); unset or empty is off.
@@ -129,13 +158,20 @@ pub fn parse_edge_headers(raw: Option<&str>) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Parse `RDNS_TIMEOUT` without panicking on negative/NaN/overflowing
-/// values (Duration::from_secs_f64 panics for those).
-pub fn parse_rdns_timeout(raw: Option<&str>) -> Duration {
-    raw.and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .map(|v| Duration::from_secs_f64(v.min(60.0)))
-        .unwrap_or(Duration::from_secs_f64(1.5))
+/// Longest `RDNS_TIMEOUT`: a lookup must end well inside the request timeout.
+pub const RDNS_TIMEOUT_MAX_SECS: f64 = 10.0;
+
+/// `RDNS_TIMEOUT` in seconds, `0` turns rDNS off. Negative, NaN and
+/// infinite values are rejected before `Duration::from_secs_f64`, which
+/// panics on them.
+pub fn parse_rdns_timeout(raw: Option<&str>) -> Result<Duration, String> {
+    let secs: f64 = parse_number("RDNS_TIMEOUT", raw, 1.5)?;
+    if !(0.0..=RDNS_TIMEOUT_MAX_SECS).contains(&secs) {
+        return Err(format!(
+            "RDNS_TIMEOUT: expected 0 to {RDNS_TIMEOUT_MAX_SECS} seconds, got {secs}"
+        ));
+    }
+    Ok(Duration::from_secs_f64(secs))
 }
 
 /// `SIGNING_KEY`: a fixed key, or a generated one when unset or blank.
@@ -200,9 +236,6 @@ mod tests {
             let err = Config::from_lookup(|var| {
                 if var == name {
                     Err(env::VarError::NotUnicode("secret".into()))
-                } else if var == "TRUST_PROXY" {
-                    // TRUST_CF is only read behind a reverse proxy.
-                    Ok("1".to_string())
                 } else {
                     Err(env::VarError::NotPresent)
                 }
@@ -226,18 +259,67 @@ mod tests {
 
     #[test]
     fn rdns_timeout_parsing_is_panic_free() {
-        let default = Duration::from_secs_f64(1.5);
+        let default = Ok(Duration::from_secs_f64(1.5));
         assert_eq!(parse_rdns_timeout(None), default);
         assert_eq!(parse_rdns_timeout(Some("")), default);
-        assert_eq!(parse_rdns_timeout(Some("-1")), default);
-        assert_eq!(parse_rdns_timeout(Some("nan")), default);
-        assert_eq!(parse_rdns_timeout(Some("inf")), default);
         assert_eq!(
             parse_rdns_timeout(Some("2.5")),
-            Duration::from_secs_f64(2.5)
+            Ok(Duration::from_secs_f64(2.5))
         );
-        assert_eq!(parse_rdns_timeout(Some("0")), Duration::ZERO);
-        assert_eq!(parse_rdns_timeout(Some("1e9")), Duration::from_secs(60));
+        assert_eq!(parse_rdns_timeout(Some("0")), Ok(Duration::ZERO));
+        assert_eq!(parse_rdns_timeout(Some("10")), Ok(Duration::from_secs(10)));
+        for bad in ["-1", "nan", "inf", "1e9", "10.5", "1,5", "1.5s"] {
+            assert!(parse_rdns_timeout(Some(bad)).is_err(), "{bad}");
+        }
+        // The longest lookup still ends well inside the request timeout.
+        assert!(Duration::from_secs_f64(RDNS_TIMEOUT_MAX_SECS) <= crate::app::REQUEST_TIMEOUT / 2);
+    }
+
+    #[test]
+    fn bad_numbers_stop_startup_instead_of_becoming_defaults() {
+        let with = |name: &'static str, value: &'static str| {
+            Config::from_lookup(move |var| {
+                if var == name {
+                    Ok(value.to_string())
+                } else {
+                    Err(env::VarError::NotPresent)
+                }
+            })
+        };
+        for (name, value) in [
+            ("PORT", "80a"),
+            ("PORT", "0"),
+            ("PORT", "65536"),
+            ("RATE_LIMIT_PER_MINUTE", "100/min"),
+            ("RATE_LIMIT_PER_MINUTE", "-1"),
+            ("RDNS_TIMEOUT", "abc"),
+            ("TRUST_CF", "ture"),
+        ] {
+            let err = with(name, value).err().unwrap_or_default();
+            assert!(err.starts_with(name), "{name}={value}: {err:?}");
+        }
+        assert_eq!(with("PORT", " 8080 ").unwrap().port, 8080);
+        assert_eq!(
+            with("RATE_LIMIT_PER_MINUTE", "0").unwrap().rate_per_minute,
+            0
+        );
+        assert_eq!(with("PORT", "").unwrap().port, 8000);
+    }
+
+    #[test]
+    fn trust_cf_needs_trust_proxy() {
+        let cfg = Config::from_lookup(|var| match var {
+            "TRUST_CF" => Ok("1".to_string()),
+            _ => Err(env::VarError::NotPresent),
+        })
+        .unwrap();
+        assert!(!cfg.trust_proxy && !cfg.trust_cf);
+        let cfg = Config::from_lookup(|var| match var {
+            "TRUST_CF" | "TRUST_PROXY" => Ok("1".to_string()),
+            _ => Err(env::VarError::NotPresent),
+        })
+        .unwrap();
+        assert!(cfg.trust_proxy && cfg.trust_cf);
     }
 
     #[test]

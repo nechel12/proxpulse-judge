@@ -18,6 +18,14 @@
   of `main`'s HEAD, so unreleased code no longer reaches `:latest`, `:YYYYMM`
   or the Render redeploy. Forks still build their own `main`.
 
+### Changed
+
+- A `PORT`, `RATE_LIMIT_PER_MINUTE` or `RDNS_TIMEOUT` that is not a number in
+  range now stops startup instead of silently becoming the default (`PORT=80a`
+  served on 8000). `RDNS_TIMEOUT` is limited to 10 seconds, inside the
+  request timeout. A typo in `TRUST_CF` stops startup even without
+  `TRUST_PROXY`, and `TRUST_CF=1` without `TRUST_PROXY=1` logs a warning.
+
 ### Fixed
 
 - `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`,

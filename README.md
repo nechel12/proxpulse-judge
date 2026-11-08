@@ -537,25 +537,29 @@ For running without Docker with logs in a file — example
 | `TRUST_PROXY` | `0` | `1` — behind a reverse proxy (IP from the end of `X-Forwarded-For`), `0` — directly exposed (IP from socket, headers untrusted); `.env.example` explicitly sets `1` |
 | `TRUST_CF` | `0` | `1` — trust `CF-Connecting-IP`; only behind Cloudflare/Tunnel and only with `TRUST_PROXY=1`. `0` — ignore (safe for Caddy/VPS) |
 | `EDGE_HEADERS` | empty | comma-separated headers the deployment's reverse proxy adds (e.g. `x-real-ip,via`); they are neither analysed nor echoed. Only with `TRUST_PROXY=1`; `x-forwarded-for` is not allowed |
-| `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, seconds; clamped to 0–60, invalid values fall back to 1.5 |
+| `RDNS_TIMEOUT` | `1.5` | server-side rDNS timeout, seconds, from `0` (rDNS off) to `10` |
 | `RATE_LIMIT_PER_MINUTE` | `6000` | token-bucket burst and sustained requests per client per minute (an IPv4 address or an IPv6 `/64`), `0` — no limit |
 | `METRICS_TOKEN` | empty | when set, `/metrics` requires `Authorization: Bearer <token>`; send it over HTTPS only |
 | `SIGNING_KEY` | empty | fixed key for signing `/judge` answers: 32 bytes in base64 (`openssl rand -base64 32`); empty — a key generated at startup, see [Signed answers](#signed-answers); a malformed key stops startup |
 | `RUST_LOG` | `info` | log level |
 
 `TRUST_PROXY` and `TRUST_CF` accept `1`/`0`, `true`/`false`, `yes`/`no`,
-`on`/`off`; any other value, an invalid `BIND_ADDR`, or a malformed
-`EDGE_HEADERS` stops the service at startup instead of silently changing which
-headers are trusted.
+`on`/`off`. Any other value, a `PORT`, `RDNS_TIMEOUT` or
+`RATE_LIMIT_PER_MINUTE` that is not a number in range, an invalid `BIND_ADDR`,
+or a malformed `EDGE_HEADERS` stops the service at startup instead of silently
+falling back to a default or changing which headers are trusted. `TRUST_CF=1`
+without `TRUST_PROXY=1` is ignored with a warning in the log.
 
 With `TRUST_PROXY=1`, the client IP is taken from the **last**
 `X-Forwarded-For` entry. Caddy 2.5+ replaces the incoming XFF with the
 immediate client address by default; `Caddyfile.example` enables
 `trusted_proxies` to preserve the checked proxy's chain, so Caddy appends
 the client address at the end. nginx (`proxy_add_x_forwarded_for`) and
-Cloudflare append as well. Reverse-proxy headers such as
-`X-Forwarded-Proto`/`Host` are excluded from anonymity detection; otherwise
-everything behind a reverse proxy would look `anonymous`. With `TRUST_CF=1`,
+Cloudflare append as well. With `TRUST_PROXY=1`, reverse-proxy headers such
+as `X-Forwarded-Proto`/`Host` do not count as proxy headers, otherwise
+everything behind a reverse proxy would look `anonymous`; their values are
+still searched for a leak. With `TRUST_PROXY=0` nothing stands in front of the
+judge, so they mark a proxy like any other `X-Forwarded-*`. With `TRUST_CF=1`,
 `CF-Connecting-IP` takes priority.
 
 ## Monitoring
