@@ -85,6 +85,12 @@
 - Hosting words in a PTR name (`vps42.hosting.example`) mark a data-center
   address when the ASN organisation is unknown; `host` alone does not, being
   common in home-line names.
+- The image's entrypoint downloads the DB-IP fallback when no database it
+  knows by name is present, not when any `.mmdb` over 1 KB is; it removes
+  folders left by an interrupted download, stops one in progress at once on
+  `docker stop`, and the health check waits out a first download. The smoke
+  scripts keep a failed container for its logs, check `--healthcheck`, and
+  report failed requests instead of stopping silently.
 
 ## [0.6.1] — 2026-11-07
 

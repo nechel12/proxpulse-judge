@@ -10,7 +10,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 seq 1 "$REQUESTS" \
   | xargs -P "$CONCURRENCY" -I{} curl -s -o /dev/null -w '%{http_code}\n' "$BASE/generate_204" \
-  > "$TMP/codes"
+  > "$TMP/codes" || true # a failed request is counted (000), not fatal
 
 TOTAL="$(wc -l < "$TMP/codes" | tr -d ' ')"
 OK="$(grep -c '^204$' "$TMP/codes" || true)"

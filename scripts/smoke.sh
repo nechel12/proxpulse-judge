@@ -51,17 +51,17 @@ curl -fsS ${AUTH[@]+"${AUTH[@]}"} -o "$TMP/body" "$BASE/metrics" || fail "/metri
 grep -q 'proxpulse_requests_total' "$TMP/body" || fail "/metrics: missing counter"
 grep -q 'proxpulse_build_info' "$TMP/body" || fail "/metrics: missing build info"
 
-code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/generate_204")"
+code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/generate_204" || true)"
 [ "$code" = "204" ] || fail "/generate_204: got $code"
 
-code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/content")"
+code="$(curl -s -o /dev/null -w '%{http_code}' "$BASE/content" || true)"
 [ "$code" = "200" ] || fail "/content: got $code"
 
-curl -fsS -D "$TMP/headers" -o /dev/null "$BASE/ip"
+curl -fsS -D "$TMP/headers" -o /dev/null "$BASE/ip" || fail "/ip: request failed"
 grep -qi '^cache-control: no-store' "$TMP/headers" || fail "/ip: no-store missing"
 grep -qi '^x-content-type-options: nosniff' "$TMP/headers" || fail "/ip: nosniff missing"
 
-curl -fsS -D "$TMP/headers" -o /dev/null "$BASE/content"
+curl -fsS -D "$TMP/headers" -o /dev/null "$BASE/content" || fail "/content: request failed"
 if grep -qi '^cache-control:' "$TMP/headers"; then
   fail "/content: unexpected cache-control"
 fi

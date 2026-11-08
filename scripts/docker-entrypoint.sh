@@ -12,12 +12,21 @@ BIN="${JUDGE_BIN:-/app/proxpulse-judge}"
 
 mkdir -p "$GEO_DIR" 2>/dev/null || true
 
-# A valid .mmdb is much larger than 1 KiB; this also ignores leftover
-# empty/partial files that would otherwise suppress the fallback forever.
+# A database the service looks for, by its known name, of a real size: any
+# leftover or broken *.mmdb would otherwise suppress the fallback forever.
 has_mmdb() {
-  find "$GEO_DIR" -maxdepth 1 -type f -name '*.mmdb' -size +1k -print -quit 2>/dev/null \
-    | grep -q .
+  local name
+  for name in GeoLite2-City dbip-city-lite GeoLite2-Country dbip-country-lite \
+    GeoLite2-ASN dbip-asn-lite; do
+    if [ -n "$(find "$GEO_DIR" -maxdepth 1 -type f -name "$name.mmdb" -size +1M -print -quit 2>/dev/null)" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
+
+# A download interrupted by a previous stop leaves its temporary folder.
+rm -rf "$GEO_DIR"/.dbip.* 2>/dev/null || true
 
 if has_mmdb; then
   echo "[entrypoint] geo DBs present in $GEO_DIR, skipping download"
@@ -25,10 +34,17 @@ elif [ ! -w "$GEO_DIR" ]; then
   echo "[entrypoint] WARNING: $GEO_DIR is not writable (read-only mount?) — skipping DB-IP fallback; geo fields will be empty" >&2
 else
   echo "[entrypoint] no .mmdb in $GEO_DIR — downloading DB-IP Lite fallback..."
-  # Do not hold container startup forever on a black-holed connection.
-  if GEO_DIR="$GEO_DIR" timeout 600 bash "$SCRIPT_DIR/download-dbip.sh"; then
+  # Do not hold container startup forever on a black-holed connection. The
+  # download runs in the background so that `docker stop` (SIGTERM to this
+  # PID 1, which ignores signals it has no trap for) ends it at once.
+  GEO_DIR="$GEO_DIR" timeout 600 bash "$SCRIPT_DIR/download-dbip.sh" &
+  download=$!
+  trap 'kill "$download" 2>/dev/null; exit 143' TERM INT
+  if wait "$download"; then
+    trap - TERM INT
     echo "[entrypoint] fallback DBs ready"
   else
+    trap - TERM INT
     echo "[entrypoint] WARNING: fallback download failed, starting without geo (geo fields will be empty)" >&2
   fi
 fi

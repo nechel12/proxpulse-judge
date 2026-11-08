@@ -35,7 +35,8 @@ COPY scripts/docker-entrypoint.sh /app/scripts/
 ENV GEO_DIR=/app/geo \
     RUST_LOG=info
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+# The entrypoint may download databases for up to 10 minutes first.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10m \
   CMD ["/app/proxpulse-judge", "--healthcheck"]
 ENTRYPOINT ["bash", "/app/scripts/docker-entrypoint.sh"]
 LABEL org.opencontainers.image.title="proxpulse-judge" \

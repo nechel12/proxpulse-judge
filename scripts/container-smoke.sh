@@ -11,13 +11,17 @@ PORT="${SMOKE_PORT:-8000}"
 BASE="http://127.0.0.1:$PORT"
 DIR="$(dirname "$0")"
 
-docker run -d --rm --name "$NAME" -p "127.0.0.1:$PORT:8000" "$@" "$IMAGE" >/dev/null
-trap 'docker logs "$NAME" || true; docker stop "$NAME" >/dev/null || true' EXIT
+# No --rm: a container that dies must still be there for `docker logs`.
+docker run -d --name "$NAME" -p "127.0.0.1:$PORT:8000" "$@" "$IMAGE" >/dev/null
+trap 'docker logs "$NAME" || true; docker rm -f "$NAME" >/dev/null || true' EXIT
 
 for _ in $(seq 1 30); do
   if curl -fsS "$BASE/healthz" >/dev/null 2>&1; then break; fi
   sleep 1
 done
+
+# The image's own health check, as Docker runs it.
+docker exec "$NAME" /app/proxpulse-judge --healthcheck || { echo "--healthcheck failed" >&2; exit 1; }
 
 bash "$DIR/smoke.sh" "$BASE"
 bash "$DIR/load.sh" "$BASE" 300 32
