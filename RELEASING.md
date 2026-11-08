@@ -53,7 +53,14 @@ with Linux binaries.
      the binaries, and `SHA256SUMS`.
 
    Scheduled runs and manual runs (`workflow_dispatch`, from `main` only)
-   refresh the databases and update only `:latest` and `:YYYYMM`.
+   rebuild the latest signed release on `main` (not `main`'s HEAD) with fresh
+   databases and update only `:latest` and `:YYYYMM`. Forks build their own
+   `main` instead, because their tags are not signed with this key. Such a
+   rebuild keeps the release's base image and dependencies, so when the
+   monthly Trivy scan starts failing on a fixed base-image or dependency
+   issue, cut a patch release with Dependabot's bumps. Its GitHub attestation
+   names the workflow run on `main`; the image's
+   `org.opencontainers.image.revision` label names the release commit built.
 
 4. **Verify the release** (anyone can do this)
 

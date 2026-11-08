@@ -1,6 +1,7 @@
 # CI and publishing.
 # PR and main: tests (stable + MSRV), linters, smoke test of the runtime image.
-# Schedule (monthly, fresh DB-IP Lite) and a manual run from main push the
+# Schedule (monthly, fresh DB-IP Lite) and a manual run from main rebuild the
+# latest signed release (not main's HEAD) with fresh databases and push the
 # multi-arch (amd64 + arm64) render image as :latest + :YYYYMM.
 # A signed vX.Y.Z tag (see RELEASING.md) additionally publishes the
 # immutable :vX.Y.Z and creates a GitHub release with Linux binaries.
@@ -139,10 +140,12 @@ jobs:
     outputs:
       name: ${{ steps.meta.outputs.name }}
       tags: ${{ steps.meta.outputs.tags }}
+      ref: ${{ steps.release.outputs.ref }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # tag verification needs origin/main
+          fetch-depth: 0 # tag verification needs origin/main and the tags
 
       # A release is a tag on main signed with the docs/proxpulse-release.pub key,
       # matching the Cargo.toml version and described in CHANGELOG.
@@ -161,11 +164,45 @@ jobs:
             exit 1
           fi
           bash scripts/release-notes.sh "${tag#v}" > /dev/null
+
+      # The image is built from a signed release: the pushed tag, or for
+      # scheduled and manual runs the latest one on main, so unreleased code
+      # never reaches :latest or Render. The verified commit, not the tag name,
+      # is what the image job checks out, so a tag moved in between is not
+      # built. Forks (told apart by repository id, which survives renames)
+      # keep building their own main: "Sync fork" does not copy tags, and
+      # their tags are not signed with this key (README, variant C).
+      - name: Release to build
+        id: release
+        env:
+          UPSTREAM_REPOSITORY_ID: "1356249112" # nechel12/proxpulse-judge
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" != tag ] && [ "$GITHUB_REPOSITORY_ID" != "$UPSTREAM_REPOSITORY_ID" ]; then
+            echo "ref=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "version=main" >> "$GITHUB_OUTPUT"
+            echo "Building $GITHUB_REPOSITORY main at $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            # Annotated tags only: a release is a signed, annotated tag.
+            tag="$(git describe --abbrev=0 --match 'v[0-9]*' origin/main)"
+          fi
           # checkout may leave a lightweight ref on the tag: take the annotated object
           git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
           printf 'proxpulse-release namespaces="git" %s\n' \
             "$(cut -d' ' -f1,2 docs/proxpulse-release.pub)" > "$RUNNER_TEMP/allowed_signers"
           git -c gpg.ssh.allowedSignersFile="$RUNNER_TEMP/allowed_signers" tag -v "$tag"
+          sha="$(git rev-parse "refs/tags/$tag^{commit}")"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$sha" != "$GITHUB_SHA" ]; then
+            echo "::error::$tag moved from $GITHUB_SHA to $sha during the run"
+            exit 1
+          fi
+          echo "ref=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          echo "Building $tag ($sha)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Image name and tags
         id: meta
@@ -215,6 +252,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -227,6 +266,11 @@ jobs:
           load: true
           no-cache: true
           tags: proxpulse-judge:render
+          # Scheduled rebuilds run on main; these name the release commit that
+          # was really built (the run's own provenance names main).
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.ref }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
 
       - name: Smoke test with baked databases
         run: SMOKE_EXPECT_GEO=1 bash scripts/container-smoke.sh proxpulse-judge:render -e TRUST_PROXY=1
@@ -257,6 +301,9 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           provenance: mode=max
           sbom: true
+          labels: |
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.ref }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
           outputs: type=image,name=${{ needs.prepare.outputs.name }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest

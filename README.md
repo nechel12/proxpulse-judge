@@ -65,9 +65,10 @@ DB-IP Lite databases to GHCR:
 docker pull ghcr.io/nechel12/proxpulse-judge:latest
 ```
 
-Monthly scheduled builds refresh the databases and update `:latest` and
-`:YYYYMM`; signed `vX.Y.Z` release tags additionally publish `:vX.Y.Z`, which
-is never overwritten. Every image passes a smoke test with the baked databases
+`:latest` is always the latest signed release, never unreleased code from
+`main`. Monthly scheduled builds rebuild that release with fresh databases and
+update `:latest` and `:YYYYMM`; signed `vX.Y.Z` release tags additionally
+publish `:vX.Y.Z`, which is never overwritten. Every image passes a smoke test with the baked databases
 and a Trivy scan before it is pushed, and carries a signed build provenance
 attestation:
 
@@ -267,9 +268,10 @@ Database updates (the image rebuilds on the 3rd of every month):
    `RENDER_DEPLOY_HOOK` secret is added (Render dashboard → service →
    Settings → Deploy Hook), and the fork's `render.yaml` points at its own
    `ghcr.io/<owner>/proxpulse-judge:latest`. Fresh images are then published
-   to the fork's GHCR and trigger redeploys automatically. Limitation: the
-   schedule is disabled after 60 days without activity in the fork — the
-   workflow is run manually from time to time (Run workflow).
+   to the fork's GHCR and trigger redeploys automatically. A fork builds its
+   own `main`, not the latest release, so it is kept in sync (Sync fork).
+   Limitation: the schedule is disabled after 60 days without activity in the
+   fork — the workflow is run manually from time to time (Run workflow).
 2. **Manually.** Render dashboard → service → Manual Deploy →
    Deploy latest reference. Geo data changes slowly, so manual updates
    are usually sufficient.

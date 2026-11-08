@@ -14,6 +14,9 @@
   headers, closes a connection whose response makes no progress for 30
   seconds (a client that stops reading), and closes any connection after 5
   minutes.
+- Scheduled and manual image builds rebuild the latest signed release instead
+  of `main`'s HEAD, so unreleased code no longer reaches `:latest`, `:YYYYMM`
+  or the Render redeploy. Forks still build their own `main`.
 
 ### Fixed
 
