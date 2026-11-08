@@ -500,7 +500,14 @@ pub struct TypeSignals {
 pub fn classify_ip(org: Option<&str>, rdns: Option<&str>) -> (String, TypeSignals) {
     let hay_org = org.unwrap_or("").to_string();
     let hay_all = format!("{} {}", hay_org, rdns.unwrap_or(""));
-    let hosting_kw = hits(&hay_org, HOSTING_KW);
+    // A PTR name like vps42.hosting.example says hosting too, but "host"
+    // alone is common in home-line names (host-1-2-3-4.isp.example).
+    let mut hosting_kw = hits(&hay_org, HOSTING_KW);
+    for kw in hits(rdns.unwrap_or(""), HOSTING_KW) {
+        if kw != "host" && !hosting_kw.contains(&kw) {
+            hosting_kw.push(kw);
+        }
+    }
     let low = hay_org.to_ascii_lowercase();
     // single-word vendors match whole tokens only: substring matching
     // would flag e.g. "Shaw Communications" via "aws". Multi-word
@@ -1109,6 +1116,22 @@ mod tests {
     fn classify_residential_default() {
         let (t, _) = classify_ip(Some("Rostelecom"), None);
         assert_eq!(t, "residential");
+    }
+
+    #[test]
+    fn hosting_words_in_the_ptr_name_count_except_host() {
+        assert_eq!(
+            classify_ip(None, Some("vps42.hosting.example")).0,
+            "datacenter"
+        );
+        assert_eq!(
+            classify_ip(None, Some("srv1.cloud.example")).0,
+            "datacenter"
+        );
+        assert_ne!(
+            classify_ip(None, Some("host-1-2-3-4.isp.example")).0,
+            "datacenter"
+        );
     }
 
     #[test]

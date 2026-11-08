@@ -82,6 +82,9 @@
 - The `METRICS_TOKEN` comparison no longer tells the token's length, and rDNS
   is skipped for more special-purpose addresses (`0.0.0.0/8`, `192.0.0.0/24`,
   `240.0.0.0/4`, `3fff::/20`, NAT64).
+- Hosting words in a PTR name (`vps42.hosting.example`) mark a data-center
+  address when the ASN organisation is unknown; `host` alone does not, being
+  common in home-line names.
 
 ## [0.6.1] — 2026-11-07
 
