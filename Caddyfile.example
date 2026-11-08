@@ -10,7 +10,7 @@
 #
 # Caddy still appends the real peer last, so the judge
 # uses the last entry for the IP and the earlier ones for leak analysis.
-check.yourdomain.com {
+(judge) {
     reverse_proxy 127.0.0.1:8000 {
         trusted_proxies 0.0.0.0/0 ::/0
         # Caddy does not use Cloudflare: nobody may forge CF headers.
@@ -21,5 +21,23 @@ check.yourdomain.com {
         # X-Forwarded-*, not CF-Connecting-IP) and set TRUST_CF=1.
         header_up -CF-Connecting-IP
         header_up -True-Client-IP
+    }
+}
+
+check.yourdomain.com {
+    import judge
+}
+
+# Anonymity is only visible over plain HTTP: inside HTTPS the proxy cannot add
+# headers. So the echo endpoints also answer on port 80, and everything else
+# (/key above all) is redirected to HTTPS. Without this block Caddy redirects
+# all of port 80 and the checker gets no anonymity verdict.
+http://check.yourdomain.com {
+    @plain path /judge /content /headers /ip
+    handle @plain {
+        import judge
+    }
+    handle {
+        redir https://{host}{uri} 308
     }
 }

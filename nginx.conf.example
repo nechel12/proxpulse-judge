@@ -7,12 +7,34 @@
 # (e.g. EDGE_HEADERS=x-real-ip) so they are not attributed
 # to the checked proxy. The realip module (set_real_ip_from) is not needed either.
 #
-# Certificate: certbot --nginx -d check.yourdomain.com (or any ACME client).
+# Certificate: certbot certonly --nginx -d check.yourdomain.com (or any ACME client).
+# Not plain `certbot --nginx`: its redirect step adds a server-level
+# `return 301` to the port-80 block, which runs before the locations below
+# and sends /judge to HTTPS again.
+
+# Anonymity is only visible over plain HTTP: inside HTTPS the proxy cannot add
+# headers. So the echo endpoints also answer on port 80, and everything else
+# (/key above all) is redirected to HTTPS.
 server {
     listen 80;
     listen [::]:80;
     server_name check.yourdomain.com;
-    return 301 https://$host$request_uri;
+
+    location ~ ^/(judge|content|headers|ip)$ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # The same two lines as in the 443 block: if Cloudflare sits in front
+        # of nginx, remove them here too.
+        proxy_set_header CF-Connecting-IP "";
+        proxy_set_header True-Client-IP "";
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
 server {

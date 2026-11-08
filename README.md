@@ -99,20 +99,38 @@ pointing at the server IP, and ports **80 and 443** must face the internet.
 Example in `Caddyfile.example`:
 
 ```caddy
-check.yourdomain.com {
+(judge) {
     reverse_proxy 127.0.0.1:8000 {
         trusted_proxies 0.0.0.0/0 ::/0
         header_up -CF-Connecting-IP
         header_up -True-Client-IP
     }
 }
+
+check.yourdomain.com {
+    import judge
+}
+
+http://check.yourdomain.com {
+    @plain path /judge /content /headers /ip
+    handle @plain {
+        import judge
+    }
+    handle {
+        redir https://{host}{uri} 308
+    }
+}
 ```
 
-Caddy issues a Let's Encrypt certificate automatically on first request.
-Verification:
+Caddy issues a Let's Encrypt certificate automatically. The `http://` block
+keeps `/judge`, `/content`, `/headers`, and `/ip` on plain HTTP and redirects
+everything else, `/key` included, to HTTPS: anonymity is only visible over
+plain HTTP (see [Signed answers](#signed-answers)), and without that block
+Caddy redirects all of port 80. Verification:
 
 ```sh
 curl https://check.yourdomain.com/healthz
+curl -s http://check.yourdomain.com/judge | head -c 200; echo   # JSON, not a redirect
 ```
 
 `Caddyfile.example` enables `trusted_proxies`: since Caddy 2.5 the incoming
@@ -130,10 +148,12 @@ used, since `trusted_proxies` only governs `X-Forwarded-*`, not
 
 ### nginx instead of Caddy
 
-[`nginx.conf.example`](nginx.conf.example) is the equivalent server block. The
-important parts:
+[`nginx.conf.example`](nginx.conf.example) is the equivalent configuration,
+with the same plain-HTTP `location` for `/judge`, `/content`, `/headers`, and
+`/ip` on port 80. The important parts:
 
 ```nginx
+location ~ ^/(judge|content|headers|ip)$ { ... }   # port 80, no redirect
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header CF-Connecting-IP "";
 proxy_set_header True-Client-IP "";
@@ -201,9 +221,13 @@ for `direct_ip` leaks. Verification:
 
 ```sh
 MYIP=$(curl -s https://api.ipify.org)
-curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
+curl -s "http://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 # expect "anonymity":"elite"
 ```
+
+For anonymity the hostname must answer plain HTTP: Cloudflare's **Always Use
+HTTPS** (SSL/TLS → Edge Certificates) stays off for it, otherwise every HTTP
+request is redirected and the checker gets no anonymity verdict.
 
 ## Variant C — Render (free hosting, no VPS)
 
@@ -214,7 +238,9 @@ A ready image with embedded DB-IP Lite rebuilds itself every month
 no disk needed. The button creates the service from `render.yaml` with
 a free `https://<name>.onrender.com` domain. The resulting URL is used in
 the checker. No Cloudflare Tunnel is needed in this setup: Render
-provides both TLS and the domain.
+provides both TLS and the domain. Render redirects all plain HTTP to HTTPS, so
+a Render instance gives IP, geo, and IP type but **no anonymity verdict**; for
+that, variant A or B is needed.
 
 Free-plan notes:
 
@@ -372,12 +398,13 @@ nonce for every checked proxy and fetches `/key` directly, not through a proxy,
 so the checked proxy cannot swap the key, and an answer it rewrites or replays
 fails verification.
 
-Signatures matter only where `/judge` answers plain HTTP. Render and the Caddy
-and nginx examples redirect HTTP to HTTPS, which hides the request from the
-judge, so ProxPulse gets no anonymity verdict from them. (Before 0.6.1 its
-HTTP-only mode reported one from the HTTPS answer, usually a false `elite` whose
-signature still verified.) For anonymity, `/judge` needs a plain-HTTP listener,
-with HTTPS kept for `/key`.
+Signatures matter only where `/judge` answers plain HTTP. The Caddy and nginx
+examples serve `/judge`, `/content`, `/headers`, and `/ip` over plain HTTP on
+port 80 and redirect everything else, `/key` included, to HTTPS. Render
+redirects all HTTP to HTTPS, which hides the request from the judge, so
+ProxPulse gets no anonymity verdict from it. (Before 0.6.1 its HTTP-only mode
+reported one from the HTTPS answer, usually a false `elite` whose signature
+still verified.)
 
 The key is only as trustworthy as the channel that delivered it. Over HTTPS,
 TLS authenticates it. Over plain HTTP, a direct request only keeps out a checked
@@ -416,14 +443,15 @@ These are shared, best-effort instances without an availability guarantee.
 For regular measurements, a self-hosted instance is required (variants A–C
 above).
 
-- **https://proxycheck.lmtunnel.com** — enabled in the checker by default.
-  Configured with a 1000 requests per minute per client limit (429 +
-  `Retry-After` on exceed; the table below lists the code default of 6000).
+- **https://proxycheck.lmtunnel.com** — the checker's built-in judge. Answers
+  plain HTTP too, so it gives anonymity verdicts. Configured with a 1000
+  requests per minute per client limit (429 + `Retry-After` on exceed; the
+  table below lists the code default of 6000).
 - **https://proxpulse-judge.onrender.com** — free Render hosting, DB-IP Lite
-  databases, image refreshed monthly. The free plan sleeps after 15 minutes
-  without traffic (waking up takes about a minute) and is limited to roughly
-  750 hours per month, so it may be unavailable near the end of the month
-  until the quota resets.
+  databases, image refreshed monthly. HTTPS only, so no anonymity verdict.
+  The free plan sleeps after 15 minutes without traffic (waking up takes
+  about a minute) and is limited to roughly 750 hours per month, so it may be
+  unavailable near the end of the month until the quota resets.
 
 Load is expected to remain reasonable: reverse-DNS is done by the server itself
 and only for unknown ASN orgs; no client-side requests are needed.
@@ -549,7 +577,8 @@ limits; metrics are process-local and reset on restart.
 |---|---|
 | Every check is `anonymous`, even an elite proxy | A reverse proxy or hosting platform on the deployment side adds a proxy header itself: `X-Real-IP`, `Via`, or `Forwarded` (typical for nginx), `Client-IP` or `X-Client-IP` (Azure App Service). Such headers are removed from the proxy configuration or listed in `EDGE_HEADERS`. `GET /headers` directly shows what reaches the judge. |
 | A direct check (no proxy) is `transparent`, and `/ip` shows `127.0.0.1` or `172.x` | The judge is behind a reverse proxy with `TRUST_PROXY=0`: `TRUST_PROXY=1` is required. |
-| A proxy known to leak is reported `elite` behind Caddy | Caddy drops the incoming `X-Forwarded-For`: `trusted_proxies` is required, as in `Caddyfile.example`. `/judge` must also be reached over plain HTTP, see [Signed answers](#signed-answers). |
+| A proxy known to leak is reported `elite` behind Caddy | Caddy drops the incoming `X-Forwarded-For`: `trusted_proxies` is required, as in `Caddyfile.example`. `/judge` must also be reached over plain HTTP, like the `http://` block in `Caddyfile.example`. |
+| The checker shows no anonymity at all (`—`) with this judge | `http://<host>/judge` is redirected to HTTPS (Render, Caddy without the `http://` block, Cloudflare's Always Use HTTPS). Anonymity is only visible over plain HTTP; `curl -sI http://<host>/judge` must answer `200`, not `301`/`308`. |
 | `/ip` shows a Cloudflare address (`172.64.x`, `162.158.x`, …) | Traffic comes through Cloudflare but `TRUST_CF=0`: `TRUST_CF=1` and `TRUST_PROXY=1` are required. |
 | Geo fields are empty with `"error": "no db"`; `/readyz` has `"geo_ready": false` | No `.mmdb` in `./geo`. The fix is to run `bash scripts/download-dbip.sh` and restart the container. |
 | The container exits with `invalid configuration` | A misspelled `TRUST_*` value, an invalid `BIND_ADDR`, `x-forwarded-for` in `EDGE_HEADERS`, or a malformed `SIGNING_KEY`; the log names the variable. |

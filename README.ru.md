@@ -99,20 +99,38 @@ gh attestation verify oci://ghcr.io/nechel12/proxpulse-judge:latest --owner nech
 **80 и 443** должны быть доступны извне. Пример в `Caddyfile.example`:
 
 ```caddy
-check.yourdomain.com {
+(judge) {
     reverse_proxy 127.0.0.1:8000 {
         trusted_proxies 0.0.0.0/0 ::/0
         header_up -CF-Connecting-IP
         header_up -True-Client-IP
     }
 }
+
+check.yourdomain.com {
+    import judge
+}
+
+http://check.yourdomain.com {
+    @plain path /judge /content /headers /ip
+    handle @plain {
+        import judge
+    }
+    handle {
+        redir https://{host}{uri} 308
+    }
+}
 ```
 
-Caddy сам выпустит сертификат Let's Encrypt при первом обращении.
-Проверка:
+Caddy сам выпустит сертификат Let's Encrypt. Блок `http://` оставляет
+`/judge`, `/content`, `/headers` и `/ip` на обычном HTTP, а всё остальное,
+включая `/key`, перенаправляет на HTTPS: анонимность видна только по обычному
+HTTP (см. [Подпись ответов](#подпись-ответов)), а без этого блока Caddy
+перенаправляет весь порт 80. Проверка:
 
 ```sh
 curl https://check.yourdomain.com/healthz
+curl -s http://check.yourdomain.com/judge | head -c 200; echo   # JSON, а не редирект
 ```
 
 `Caddyfile.example` включает `trusted_proxies`: с Caddy 2.5+ без этого
@@ -131,10 +149,12 @@ Authenticated Origin Pulls, поскольку `trusted_proxies` контрол�
 
 ### nginx вместо Caddy
 
-[`nginx.conf.example`](nginx.conf.example) — аналогичный server-блок. Главное
-в нём:
+[`nginx.conf.example`](nginx.conf.example) — аналогичная конфигурация с тем же
+`location` для `/judge`, `/content`, `/headers` и `/ip` по обычному HTTP на
+порту 80. Главное в ней:
 
 ```nginx
+location ~ ^/(judge|content|headers|ip)$ { ... }   # порт 80, без редиректа
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 proxy_set_header CF-Connecting-IP "";
 proxy_set_header True-Client-IP "";
@@ -202,9 +222,14 @@ Cloudflare, приоритет выше `X-Forwarded-For`). Известные �
 
 ```sh
 MYIP=$(curl -s https://api.ipify.org)
-curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
+curl -s "http://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 # ждём "anonymity":"elite"
 ```
+
+Для анонимности хост должен отвечать по обычному HTTP: настройка Cloudflare
+**Always Use HTTPS** (SSL/TLS → Edge Certificates) для него остаётся
+выключенной, иначе каждый HTTP-запрос перенаправляется и чекер не получает
+вердикта анонимности.
 
 ## Вариант В — Render (бесплатный хостинг, без VPS)
 
@@ -215,7 +240,9 @@ curl -s "https://check.yourdomain.com/judge?direct_ip=$MYIP" | head -c 300; echo
 диск не нужен. Кнопка создаёт сервис по `render.yaml` с бесплатным доменом
 `https://<имя>.onrender.com`. Полученный URL указывается в чекере.
 Cloudflare Tunnel в этом варианте не требуется: TLS и домен
-предоставляет Render.
+предоставляет Render. Render перенаправляет весь обычный HTTP на HTTPS,
+поэтому такой инстанс даёт IP, гео и тип IP, но **не вердикт анонимности**;
+для него нужен вариант А или Б.
 
 Особенности free-плана:
 
@@ -375,12 +402,13 @@ ProxPulse отправляет случайный nonce для каждого п
 `/key` напрямую, не через прокси, поэтому проверяемый прокси не может подменить
 ключ, а переписанный или повторённый им ответ не проходит проверку.
 
-Подпись важна только там, где `/judge` отвечает по обычному HTTP. Render и
-примеры для Caddy и nginx перенаправляют HTTP на HTTPS, а это скрывает запрос от
-judge, поэтому вердикта анонимности ProxPulse от них не получит. (До версии 0.6.1
-в режиме только HTTP он показывал вердикт из HTTPS-ответа, обычно ложный `elite`,
-и подпись при этом сходилась.) Для анонимности `/judge` должен быть доступен по
-обычному HTTP, а `/key` — по-прежнему по HTTPS.
+Подпись важна только там, где `/judge` отвечает по обычному HTTP. Примеры для
+Caddy и nginx отдают `/judge`, `/content`, `/headers` и `/ip` по обычному HTTP
+на порту 80, а всё остальное, включая `/key`, перенаправляют на HTTPS. Render
+перенаправляет весь HTTP на HTTPS, а это скрывает запрос от judge, поэтому
+вердикта анонимности ProxPulse от него не получит. (До версии 0.6.1 в режиме
+только HTTP он показывал вердикт из HTTPS-ответа, обычно ложный `elite`, и
+подпись при этом сходилась.)
 
 Ключу можно доверять настолько, насколько надёжен канал, по которому он
 получен. По HTTPS его подлинность подтверждает TLS. По обычному HTTP прямой
@@ -421,11 +449,13 @@ openssl rand -base64 32   # любые 32 случайных байта: выв�
 доступности. Для регулярных измерений требуется собственный инстанс
 (варианты А–В выше).
 
-- **https://proxycheck.lmtunnel.com** — включён в чекер по умолчанию.
-  Настроен лимит 1000 запросов в минуту с одного клиента (при превышении —
-  429 + `Retry-After`; в конфиге по умолчанию — 6000, таблица ниже).
+- **https://proxycheck.lmtunnel.com** — встроенный judge чекера. Отвечает и
+  по обычному HTTP, поэтому даёт вердикт анонимности. Настроен лимит
+  1000 запросов в минуту с одного клиента (при превышении — 429 +
+  `Retry-After`; в конфиге по умолчанию — 6000, таблица ниже).
 - **https://proxpulse-judge.onrender.com** — бесплатный Render, базы
-  DB-IP Lite, образ обновляется каждый месяц. На free-плане сервис
+  DB-IP Lite, образ обновляется каждый месяц. Только HTTPS, поэтому без
+  вердикта анонимности. На free-плане сервис
   засыпает после 15 минут без трафика (пробуждение около минуты) и
   ограничен примерно 750 часами в месяц, поэтому в конце месяца может
   быть недоступен до обновления квоты.
@@ -554,7 +584,8 @@ mount); иначе в лог пишется warning и сервис старту
 |---|---|
 | Все проверки `anonymous`, даже elite-прокси | Реверс-прокси или хостинг на стороне развёртывания сам добавляет заголовок прокси: `X-Real-IP`, `Via` или `Forwarded` (типично для nginx), `Client-IP` или `X-Client-IP` (Azure App Service). Такие заголовки удаляются из конфигурации прокси или перечисляются в `EDGE_HEADERS`. Прямой `GET /headers` покажет, что доходит до judge. |
 | Прямая проверка (без прокси) — `transparent`, а `/ip` показывает `127.0.0.1` или `172.x` | Judge стоит за реверс-прокси с `TRUST_PROXY=0`: требуется `TRUST_PROXY=1`. |
-| Заведомо «текущий» прокси за Caddy получает `elite` | Caddy отбрасывает входящий `X-Forwarded-For`: требуется `trusted_proxies`, как в `Caddyfile.example`. Кроме того, `/judge` должен быть доступен по обычному HTTP, см. [Подпись ответов](#подпись-ответов). |
+| Заведомо «текущий» прокси за Caddy получает `elite` | Caddy отбрасывает входящий `X-Forwarded-For`: требуется `trusted_proxies`, как в `Caddyfile.example`. Кроме того, `/judge` должен быть доступен по обычному HTTP, как блок `http://` в `Caddyfile.example`. |
+| Чекер вообще не показывает анонимность (`—`) с этим judge | `http://<хост>/judge` перенаправляется на HTTPS (Render, Caddy без блока `http://`, Always Use HTTPS у Cloudflare). Анонимность видна только по обычному HTTP; `curl -sI http://<хост>/judge` должен отвечать `200`, а не `301`/`308`. |
 | `/ip` показывает адрес Cloudflare (`172.64.x`, `162.158.x`, …) | Трафик идёт через Cloudflare, а `TRUST_CF=0`: требуются `TRUST_CF=1` и `TRUST_PROXY=1`. |
 | Гео пустое с `"error": "no db"`; в `/readyz` `"geo_ready": false` | В `./geo` нет `.mmdb`. Требуется выполнить `bash scripts/download-dbip.sh` и перезапустить контейнер. |
 | Контейнер завершается с `invalid configuration` | Опечатка в значении `TRUST_*`, некорректный `BIND_ADDR`, `x-forwarded-for` в `EDGE_HEADERS` или неверный `SIGNING_KEY`; переменная указана в логе. |

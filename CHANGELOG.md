@@ -24,6 +24,10 @@
   **Upgrade note:** a platform in front of the judge that adds one of them
   itself (Azure App Service adds `Client-IP` and `X-Client-IP`) needs it in
   `EDGE_HEADERS`, or every check comes out `anonymous`.
+- The Caddy and nginx examples serve `/judge`, `/content`, `/headers`, and `/ip`
+  over plain HTTP on port 80 and redirect the rest to HTTPS. Before, they
+  redirected all HTTP, so no documented deployment gave an anonymity verdict.
+  The README now says which deployments and public instances answer plain HTTP.
 
 ## [0.6.1] — 2026-11-07
 
