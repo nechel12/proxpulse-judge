@@ -42,9 +42,30 @@ the optional database download fallback, the Render image does not.
 
 ## Quickstart
 
-Requires [Docker](https://docs.docker.com/get-docker/) with Compose, plus
-`bash`, `curl`, and `gzip` for the database download script. For Docker-free
-development, [Rust](https://rustup.rs/) 1.88 or newer is required.
+One command with [Docker](https://docs.docker.com/get-docker/) and the
+prebuilt image, which carries the DB-IP Lite databases:
+
+```sh
+docker run -d --name proxpulse-judge -p 8000:8000 ghcr.io/nechel12/proxpulse-judge:latest
+curl http://127.0.0.1:8000/judge
+```
+
+Asked directly from the same machine, the judge answers with the address it
+sees, which is Docker's gateway (`"ip": "172.17.0.1"`), so `geo` says
+`"error": "not found"` (a private address is in no database), `ip_type` is
+`unknown` and `anonymity` is `elite`. That is the expected answer for a local
+request; through a proxy, the answer shows the proxy's exit, as in the
+[example below](#endpoints). The checker needs the judge on a public address:
+
+| Variant | Needs | Anonymity verdict |
+|---|---|---|
+| [A — Caddy or nginx on a VPS](#variant-a--caddy-reverse-proxy) | a domain, ports 80 and 443 | yes |
+| [B — Cloudflare Tunnel](#variant-b--cloudflare-tunnel-no-caddy-no-open-ports) | a domain on Cloudflare, no open ports | yes, with Always Use HTTPS off |
+| [C — Render](#variant-c--render-free-hosting-no-vps) | a free account, no server | no: Render answers HTTPS only |
+
+From source, with your own database files in `./geo` (needs `bash`, `curl`
+and `gzip` for the download script; [Rust](https://rustup.rs/) 1.88 or newer
+for a build without Docker):
 
 ```sh
 git clone https://github.com/nechel12/proxpulse-judge.git
@@ -52,8 +73,6 @@ cd proxpulse-judge
 bash scripts/download-dbip.sh   # downloads City + ASN, no keys needed
 cp .env.example .env
 docker compose up -d --build
-
-curl http://127.0.0.1:8000/judge
 ```
 
 ### Prebuilt image and binaries
@@ -76,13 +95,42 @@ attestation:
 gh attestation verify oci://ghcr.io/nechel12/proxpulse-judge:latest --owner nechel12
 ```
 
-These images are intended for stateless hosts such as Render and do not
-contain MaxMind data. For a VPS with local MaxMind/DB-IP files, the default
-`Dockerfile` target is built and `./geo` is mounted as described below.
+The images contain no MaxMind data. On a VPS,
+[`docker-compose.ghcr.yml`](docker-compose.ghcr.yml) runs the image with the
+same limits as `docker-compose.yml`, but without the `./geo` volume, which
+would hide the baked databases:
+
+```sh
+cp .env.example .env
+docker compose -f docker-compose.ghcr.yml up -d
+# update to a new release or the monthly databases:
+docker compose -f docker-compose.ghcr.yml pull && docker compose -f docker-compose.ghcr.yml up -d
+```
+
+With your own MaxMind or DB-IP files, the default `Dockerfile` target is built
+and `./geo` is mounted (`docker-compose.yml`), as described below.
 
 Each [GitHub release](https://github.com/nechel12/proxpulse-judge/releases)
 also ships static Linux binaries (`x86_64`, `aarch64`) with `SHA256SUMS` and
-attestations.
+attestations. An archive holds the binary, `.env.example` and
+`download-dbip.sh`. The binary reads no `.env` file: its settings come from
+the environment, for example from a systemd unit:
+
+```sh
+GEO_DIR=/opt/proxpulse-judge/geo JUDGE_BIN=./proxpulse-judge bash download-dbip.sh
+```
+
+```ini
+# /etc/systemd/system/proxpulse-judge.service
+[Service]
+ExecStart=/opt/proxpulse-judge/proxpulse-judge
+Environment=GEO_DIR=/opt/proxpulse-judge/geo TRUST_PROXY=1 BIND_ADDR=127.0.0.1
+DynamicUser=yes
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
 
 > [!IMPORTANT]
 > The image defaults to `TRUST_PROXY=0` and `TRUST_CF=0`: the client IP is the

@@ -18,6 +18,17 @@
   of `main`'s HEAD, so unreleased code no longer reaches `:latest`, `:YYYYMM`
   or the Render redeploy. Forks still build their own `main`.
 
+### Added
+
+- `docker-compose.ghcr.yml` runs the prebuilt image with the same limits as
+  `docker-compose.yml` but without the `./geo` volume, which hid the
+  databases baked into the image; the README shows how to update it.
+- Release archives include `.env.example` and `download-dbip.sh`, and the
+  README shows a systemd unit for the binary, which reads no `.env`.
+- The quickstart starts with one `docker run` of the prebuilt image, explains
+  the answer a local request gets (Docker's gateway address, `not found` geo)
+  and lists which deployment gives an anonymity verdict.
+
 ### Changed
 
 - A `PORT`, `RATE_LIMIT_PER_MINUTE` or `RDNS_TIMEOUT` that is not a number in

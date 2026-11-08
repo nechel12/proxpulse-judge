@@ -440,7 +440,8 @@ jobs:
           set -euo pipefail
           name="proxpulse-judge-${GITHUB_REF_NAME}-${TARGET}"
           mkdir -p "dist/$name"
-          cp "target/$TARGET/release/proxpulse-judge" LICENSE README.md "dist/$name/"
+          cp "target/$TARGET/release/proxpulse-judge" LICENSE README.md .env.example \
+            scripts/download-dbip.sh "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

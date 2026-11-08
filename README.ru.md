@@ -42,9 +42,30 @@ HTTP API в обработке запросов; rate-limit на клиента 
 
 ## Быстрый старт
 
-Нужны [Docker](https://docs.docker.com/get-docker/) с Compose, а также
-`bash`, `curl` и `gzip` для скрипта скачивания баз. Для разработки без
-Docker — [Rust](https://rustup.rs/) 1.88 или новее.
+Одна команда с [Docker](https://docs.docker.com/get-docker/) и готовым
+образом, в котором уже есть базы DB-IP Lite:
+
+```sh
+docker run -d --name proxpulse-judge -p 8000:8000 ghcr.io/nechel12/proxpulse-judge:latest
+curl http://127.0.0.1:8000/judge
+```
+
+На прямой запрос с той же машины judge отвечает адресом, который видит, — это
+шлюз Docker (`"ip": "172.17.0.1"`), поэтому в `geo` будет
+`"error": "not found"` (частного адреса нет ни в одной базе), `ip_type` —
+`unknown`, а `anonymity` — `elite`. Для локального запроса это ожидаемый
+ответ; через прокси в ответе будет выходной адрес прокси, как в
+[примере ниже](#эндпоинты). Чекеру judge нужен на публичном адресе:
+
+| Вариант | Что нужно | Вердикт анонимности |
+|---|---|---|
+| [А — Caddy или nginx на VPS](#вариант-а--caddy-реверс-прокси) | домен, порты 80 и 443 | да |
+| [Б — Cloudflare Tunnel](#вариант-б--cloudflare-tunnel-без-caddy-и-открытых-портов) | домен в Cloudflare, без открытых портов | да, при выключенном Always Use HTTPS |
+| [В — Render](#вариант-в--render-бесплатный-хостинг-без-vps) | бесплатный аккаунт, без сервера | нет: Render отвечает только по HTTPS |
+
+Из исходников, со своими файлами баз в `./geo` (для скрипта скачивания нужны
+`bash`, `curl` и `gzip`; для сборки без Docker —
+[Rust](https://rustup.rs/) 1.88 или новее):
 
 ```sh
 git clone https://github.com/nechel12/proxpulse-judge.git
@@ -52,8 +73,6 @@ cd proxpulse-judge
 bash scripts/download-dbip.sh   # качает City + ASN без ключей
 cp .env.example .env
 docker compose up -d --build
-
-curl http://127.0.0.1:8000/judge
 ```
 
 ### Готовый образ и бинарники
@@ -76,13 +95,42 @@ smoke-тест со вшитыми базами и скан Trivy и несёт 
 gh attestation verify oci://ghcr.io/nechel12/proxpulse-judge:latest --owner nechel12
 ```
 
-Образы рассчитаны на stateless-хостинг (Render и аналоги) и не содержат
-данных MaxMind. Для VPS с локальными файлами MaxMind/DB-IP используется цель
-`Dockerfile` по умолчанию и смонтированный каталог `./geo`, как описано ниже.
+Данных MaxMind в образах нет. На VPS
+[`docker-compose.ghcr.yml`](docker-compose.ghcr.yml) запускает образ с теми же
+ограничениями, что и `docker-compose.yml`, но без тома `./geo`, который
+закрыл бы вшитые базы:
+
+```sh
+cp .env.example .env
+docker compose -f docker-compose.ghcr.yml up -d
+# обновление до нового релиза или ежемесячных баз:
+docker compose -f docker-compose.ghcr.yml pull && docker compose -f docker-compose.ghcr.yml up -d
+```
+
+Со своими файлами MaxMind или DB-IP собирается цель `Dockerfile` по умолчанию
+и монтируется `./geo` (`docker-compose.yml`), как описано ниже.
 
 К каждому [релизу на GitHub](https://github.com/nechel12/proxpulse-judge/releases)
 прикладываются статические Linux-бинарники (`x86_64`, `aarch64`) с
-`SHA256SUMS` и attestation.
+`SHA256SUMS` и attestation. В архиве — бинарник, `.env.example` и
+`download-dbip.sh`. Файл `.env` бинарник не читает: настройки берутся из
+окружения, например из юнита systemd:
+
+```sh
+GEO_DIR=/opt/proxpulse-judge/geo JUDGE_BIN=./proxpulse-judge bash download-dbip.sh
+```
+
+```ini
+# /etc/systemd/system/proxpulse-judge.service
+[Service]
+ExecStart=/opt/proxpulse-judge/proxpulse-judge
+Environment=GEO_DIR=/opt/proxpulse-judge/geo TRUST_PROXY=1 BIND_ADDR=127.0.0.1
+DynamicUser=yes
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
 
 > [!IMPORTANT]
 > По умолчанию в образе `TRUST_PROXY=0` и `TRUST_CF=0`: IP клиента берётся из

@@ -1,0 +1,47 @@
+# The prebuilt image from GHCR, with DB-IP Lite databases inside it.
+#   docker compose -f docker-compose.ghcr.yml up -d
+# Update (a new release, or the monthly rebuild with fresh databases):
+#   docker compose -f docker-compose.ghcr.yml pull
+#   docker compose -f docker-compose.ghcr.yml up -d
+# No ./geo volume here: an empty or missing folder mounted over /app/geo
+# would hide the databases baked into the image. With your own MaxMind or
+# DB-IP files, use docker-compose.yml instead.
+services:
+  judge:
+    image: ghcr.io/nechel12/proxpulse-judge:latest
+    container_name: proxpulse-judge
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT:-8000}:${PORT:-8000}" # only the reverse proxy faces outward
+    env_file:
+      - .env
+    # The service writes nothing to disk and needs no privileges.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Databases live in RAM (DB-IP City + ASN ≈ 200 MB) plus caches.
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    healthcheck:
+      test: ["CMD", "/app/proxpulse-judge", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - proxpulse-net
+
+networks:
+  proxpulse-net:
+    name: proxpulse-net # fixed name: compose creates the network if it is missing
