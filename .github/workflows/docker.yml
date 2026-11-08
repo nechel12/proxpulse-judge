@@ -59,13 +59,20 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # One script per call: `bash -n a.sh b.sh` checks only a.sh and passes
+      # the rest to it as arguments.
       - name: Shell syntax
-        run: bash -n scripts/*.sh
+        run: for f in scripts/*.sh; do bash -n "$f" || exit 1; done
 
+      # cargo-audit directly: rustsec/audit-check reports through the Checks
+      # API, which this read-only token cannot write, so any warning failed
+      # the job with a 403, and on schedule it would open an issue instead of
+      # failing. Vulnerabilities fail the job; warnings (unmaintained, yanked)
+      # are printed.
       - name: RustSec audit
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cargo install --locked cargo-audit --version 0.22.2
+          cargo audit
 
       - name: Actionlint
         uses: reviewdog/action-actionlint@619a81ec64ff8c0211cd6146eb2b21e8f1d7f440 # v1.81.1
@@ -322,8 +329,14 @@ jobs:
 
   # Builds the multi-arch index from the tested digests and attaches
   # the tags and the attestation to it.
+  # On a tag, the image goes out only after the binaries built, so a broken
+  # binary build cannot leave a published :vX.Y.Z without its release.
+  # binaries is skipped on scheduled runs, which must not skip this job.
   publish:
-    needs: [prepare, image]
+    needs: [prepare, image, binaries]
+    if: >-
+      ${{ !cancelled() && needs.image.result == 'success'
+      && (needs.binaries.result == 'success' || needs.binaries.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -383,9 +396,12 @@ jobs:
       # Actions in the fork's Actions tab (off by default; the schedule
       # lives only on the default branch and dies after 60 days without
       # activity — see README, variant C).
+      # An unreachable Render must not fail the job: the image is already
+      # published, and a failure here would skip the GitHub release.
       - name: Trigger Render redeploy
         if: ${{ env.RENDER_DEPLOY_HOOK != '' }}
-        run: curl -fsS "$RENDER_DEPLOY_HOOK"
+        run: |
+          curl -fsS --max-time 30 "$RENDER_DEPLOY_HOOK"             || echo "::warning::Render deploy hook failed; redeploy the service by hand"
 
   # Static (musl) Linux binaries for the release.
   binaries:

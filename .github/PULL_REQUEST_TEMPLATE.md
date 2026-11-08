@@ -7,7 +7,7 @@
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo test`
-- [ ] `bash -n scripts/*.sh`
+- [ ] `for f in scripts/*.sh; do bash -n "$f"; done`
 - [ ] Docker build (if container files changed)
 
 ## Checklist

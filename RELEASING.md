@@ -13,7 +13,8 @@ with Linux binaries.
    - Bump `version` in `Cargo.toml`; run `cargo check` so `Cargo.lock`
      updates.
    - Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
-     `cargo test`, and `bash -n scripts/*.sh`.
+     `cargo test`, and
+     `for f in scripts/*.sh; do bash -n "$f"; done`.
 
 2. **Verify locally**
    - `docker build -t proxpulse-judge:local .`, then
@@ -50,7 +51,12 @@ with Linux binaries.
      signed GitHub attestation.
    - The same run builds static `x86_64`/`aarch64` musl binaries, attests
      them, and creates the GitHub release with the changelog notes,
-     the binaries, and `SHA256SUMS`.
+     the binaries, and `SHA256SUMS`. The image is pushed only after both
+     binaries built, and a failing Render deploy hook only leaves a warning.
+   - If a release run fails after the image was pushed (the `release` job,
+     for example), use **Re-run failed jobs**, never **Re-run all jobs**: a
+     full re-run stops at "Refuse to overwrite a published version", since
+     `:vX.Y.Z` already exists.
 
    Scheduled runs and manual runs (`workflow_dispatch`, from `main` only)
    rebuild the latest signed release on `main` (not `main`'s HEAD) with fresh

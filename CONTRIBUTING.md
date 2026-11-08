@@ -13,7 +13,7 @@ explain the behavior and tradeoffs in the PR description.
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-bash -n scripts/*.sh
+for f in scripts/*.sh; do bash -n "$f"; done
 ```
 
 For Docker changes, build the affected image:
