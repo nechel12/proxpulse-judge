@@ -47,6 +47,9 @@
 - A proxy that writes its own exit address into `X-Forwarded-For` is
   `anonymous` behind Cloudflare too, as it already was behind Caddy and nginx;
   only the copy Cloudflare appends is removed.
+- The Caddy and nginx examples no longer strip `CF-Connecting-IP` and
+  `True-Client-IP`. With `TRUST_CF=0` the judge never takes the client address
+  from them, so stripping them only hid proxies that leak the real IP there.
 - `--check-geo` fails when a database file it tries cannot be used, not only
   when none loads, and `download-dbip.sh` checks City and ASN each on its
   own. Before, a good City file let a broken ASN download replace a working

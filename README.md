@@ -103,8 +103,6 @@ Example in `Caddyfile.example`:
 (judge) {
     reverse_proxy 127.0.0.1:8000 {
         trusted_proxies 0.0.0.0/0 ::/0
-        header_up -CF-Connecting-IP
-        header_up -True-Client-IP
     }
 }
 
@@ -139,10 +137,12 @@ curl -s http://check.yourdomain.com/judge | head -c 200; echo   # JSON, not a re
 would not see a real-IP leak passed via XFF. Trusting XFF from all clients is
 safe only because the judge listens on `127.0.0.1` and is reachable solely
 through Caddy. `TRUST_CF=0` (the default) is required for this variant: there
-is no Cloudflare here, and CF headers are trivially forgeable.
+is no Cloudflare here, and CF headers are trivially forgeable. With it the
+judge never takes the client address from `CF-Connecting-IP` or
+`True-Client-IP`; it only searches them for the checker's real IP, like any
+other header, so the examples pass them through.
 
-If Cloudflare sits **in front of** Caddy, the CF headers are not stripped:
-`trusted_proxies` is set to Cloudflare's ranges instead of `0.0.0.0/0`, ports
+If Cloudflare sits **in front of** Caddy, `trusted_proxies` is set to Cloudflare's ranges instead of `0.0.0.0/0`, ports
 80/443 are restricted to Cloudflare IPs (or Authenticated Origin Pulls is
 used, since `trusted_proxies` only governs `X-Forwarded-*`, not
 `CF-Connecting-IP`), and both `TRUST_CF=1` and `TRUST_PROXY=1` are required.
@@ -156,8 +156,6 @@ with the same plain-HTTP `location` for `/judge`, `/content`, `/headers`, and
 ```nginx
 location ~ ^/(judge|content|headers|ip)$ { ... }   # port 80, no redirect
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-proxy_set_header CF-Connecting-IP "";
-proxy_set_header True-Client-IP "";
 ```
 
 nginx appends the connecting address to the proxy's `X-Forwarded-For`, so

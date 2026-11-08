@@ -13,14 +13,14 @@
 (judge) {
     reverse_proxy 127.0.0.1:8000 {
         trusted_proxies 0.0.0.0/0 ::/0
-        # Caddy does not use Cloudflare: nobody may forge CF headers.
-        # If Cloudflare sits IN FRONT OF Caddy, remove these two lines,
-        # set trusted_proxies to Cloudflare's ranges, restrict ports
-        # 80/443 to Cloudflare addresses only (firewall or
-        # Authenticated Origin Pulls: trusted_proxies governs only
-        # X-Forwarded-*, not CF-Connecting-IP) and set TRUST_CF=1.
-        header_up -CF-Connecting-IP
-        header_up -True-Client-IP
+        # CF-Connecting-IP and True-Client-IP pass through: with TRUST_CF=0
+        # (the default, no Cloudflare here) the judge never takes the client
+        # address from them, it only searches them for a leaked real IP.
+        # If Cloudflare sits IN FRONT OF Caddy, set trusted_proxies to
+        # Cloudflare's ranges, restrict ports 80/443 to Cloudflare
+        # addresses only (firewall or Authenticated Origin Pulls:
+        # trusted_proxies governs only X-Forwarded-*, not CF-Connecting-IP)
+        # and set TRUST_CF=1.
     }
 }
 

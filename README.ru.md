@@ -103,8 +103,6 @@ gh attestation verify oci://ghcr.io/nechel12/proxpulse-judge:latest --owner nech
 (judge) {
     reverse_proxy 127.0.0.1:8000 {
         trusted_proxies 0.0.0.0/0 ::/0
-        header_up -CF-Connecting-IP
-        header_up -True-Client-IP
     }
 }
 
@@ -139,10 +137,12 @@ curl -s http://check.yourdomain.com/judge | head -c 200; echo   # JSON, а не 
 не увидит утечку реального IP через XFF. Доверять XFF всем клиентам
 можно только потому, что judge слушает `127.0.0.1` и доступен лишь
 через Caddy. Для этого варианта `TRUST_CF` должен оставаться `0`
-(дефолт): Cloudflare здесь нет, а CF-заголовки легко подделать.
+(дефолт): Cloudflare здесь нет, а CF-заголовки легко подделать. С ним judge
+никогда не берёт адрес клиента из `CF-Connecting-IP` или `True-Client-IP`, а
+только ищет в них настоящий IP чекера, как в любом другом заголовке, поэтому
+примеры пропускают их.
 
-Если Cloudflare стоит **перед** Caddy, CF-заголовки не удаляются:
-`trusted_proxies` задаётся диапазонами Cloudflare вместо `0.0.0.0/0`, порты
+Если Cloudflare стоит **перед** Caddy, `trusted_proxies` задаётся диапазонами Cloudflare вместо `0.0.0.0/0`, порты
 80/443 ограничиваются IP-диапазонами Cloudflare (либо включается
 Authenticated Origin Pulls, поскольку `trusted_proxies` контролирует только
 `X-Forwarded-*`, но не `CF-Connecting-IP`); также требуются `TRUST_CF=1`
@@ -157,8 +157,6 @@ Authenticated Origin Pulls, поскольку `trusted_proxies` контрол�
 ```nginx
 location ~ ^/(judge|content|headers|ip)$ { ... }   # порт 80, без редиректа
 proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-proxy_set_header CF-Connecting-IP "";
-proxy_set_header True-Client-IP "";
 ```
 
 nginx дописывает адрес подключившегося к `X-Forwarded-For` прокси, поэтому
