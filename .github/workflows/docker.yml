@@ -401,7 +401,8 @@ jobs:
       - name: Trigger Render redeploy
         if: ${{ env.RENDER_DEPLOY_HOOK != '' }}
         run: |
-          curl -fsS --max-time 30 "$RENDER_DEPLOY_HOOK"             || echo "::warning::Render deploy hook failed; redeploy the service by hand"
+          curl -fsS --max-time 30 "$RENDER_DEPLOY_HOOK" \
+            || echo "::warning::Render deploy hook failed; redeploy the service by hand"
 
   # Static (musl) Linux binaries for the release.
   binaries:

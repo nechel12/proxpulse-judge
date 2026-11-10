@@ -106,7 +106,7 @@ async fn main() {
         std::process::exit(i32::from(!healthy));
     }
 
-    let geo_dir = std::env::var("GEO_DIR").unwrap_or_else(|_| "/app/geo".to_string());
+    let geo_dir = config::geo_dir(std::env::var("GEO_DIR").ok().as_deref());
     if std::env::args().any(|a| a == "--check-geo") {
         match GeoPool::open(Path::new(&geo_dir)).verify() {
             Ok(()) => std::process::exit(0),

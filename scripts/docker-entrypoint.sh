@@ -12,21 +12,19 @@ BIN="${JUDGE_BIN:-/app/proxpulse-judge}"
 
 mkdir -p "$GEO_DIR" 2>/dev/null || true
 
-# A database the service looks for, by its known name, of a real size: any
-# leftover or broken *.mmdb would otherwise suppress the fallback forever.
+# A database the service would load: a .mmdb named for a city, country or
+# ASN database (dated and custom names included, as in src/geo.rs), of a real
+# size. Any leftover or broken *.mmdb would otherwise suppress the fallback
+# forever, and a fallback downloaded next to a custom-named database would
+# take precedence over it.
 has_mmdb() {
-  local name
-  for name in GeoLite2-City dbip-city-lite GeoLite2-Country dbip-country-lite \
-    GeoLite2-ASN dbip-asn-lite; do
-    if [ -n "$(find "$GEO_DIR" -maxdepth 1 -type f -name "$name.mmdb" -size +1M -print -quit 2>/dev/null)" ]; then
-      return 0
-    fi
-  done
-  return 1
+  [ -n "$(find "$GEO_DIR" -maxdepth 1 -type f -size +1M \
+    \( -iname '*city*.mmdb' -o -iname '*country*.mmdb' -o -iname '*asn*.mmdb' \) \
+    -print -quit 2>/dev/null)" ]
 }
 
 # A download interrupted by a previous stop leaves its temporary folder.
-rm -rf "$GEO_DIR"/.dbip.* 2>/dev/null || true
+rm -rf "${GEO_DIR:?}"/.dbip.* 2>/dev/null || true
 
 if has_mmdb; then
   echo "[entrypoint] geo DBs present in $GEO_DIR, skipping download"

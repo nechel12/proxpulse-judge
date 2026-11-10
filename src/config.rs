@@ -58,7 +58,7 @@ impl Config {
         Ok(Self {
             port: parse_port(get("PORT")?.as_deref())?,
             bind: parse_bind(get("BIND_ADDR")?.as_deref())?,
-            geo_dir: get("GEO_DIR")?.unwrap_or_else(|| "/app/geo".to_string()),
+            geo_dir: geo_dir(get("GEO_DIR")?.as_deref()),
             trust_proxy,
             trust_cf,
             rdns_timeout: parse_rdns_timeout(get("RDNS_TIMEOUT")?.as_deref())?,
@@ -93,6 +93,15 @@ fn parse_port(raw: Option<&str>) -> Result<u16, String> {
     match parse_number("PORT", raw, 8000)? {
         0 => Err("PORT: expected 1 to 65535, got 0".to_string()),
         port => Ok(port),
+    }
+}
+
+/// `GEO_DIR`: unset or blank is the image's folder, like the other settings;
+/// a blank value used to be opened as the path "" and left geo empty.
+pub fn geo_dir(raw: Option<&str>) -> String {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(dir) => dir.to_string(),
+        None => "/app/geo".to_string(),
     }
 }
 
@@ -196,6 +205,13 @@ fn parse_var(name: &str, raw: Result<String, env::VarError>) -> Result<Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blank_geo_dir_is_the_default() {
+        assert_eq!(geo_dir(None), "/app/geo");
+        assert_eq!(geo_dir(Some("  ")), "/app/geo");
+        assert_eq!(geo_dir(Some("./geo")), "./geo");
+    }
 
     #[test]
     fn signing_key_is_fixed_generated_or_rejected() {

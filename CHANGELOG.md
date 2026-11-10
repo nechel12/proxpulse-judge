@@ -12,8 +12,8 @@
   `/healthz` included. The judge now serves HTTP/1 only (every edge in front
   of it talks HTTP/1.1), buffers at most 64 KB per connection while reading
   headers, closes a connection whose response makes no progress for 30
-  seconds (a client that stops reading), and closes any connection after 5
-  minutes.
+  seconds (a client that stops reading), and after 5 minutes lets a
+  connection finish the request in flight and then closes it.
 - Scheduled and manual image builds rebuild the latest signed release instead
   of `main`'s HEAD, so unreleased code no longer reaches `:latest`, `:YYYYMM`
   or the Render redeploy. Forks still build their own `main`.
@@ -91,12 +91,15 @@
   address when the ASN organisation is unknown; `host` alone does not, being
   common in home-line names, and neither does a name that also has a
   home-line or mobile word.
-- The image's entrypoint downloads the DB-IP fallback when no database it
-  knows by name is present, not when any `.mmdb` over 1 KB is; it removes
+- The image's entrypoint downloads the DB-IP fallback when no city, country
+  or ASN database of a real size is present (dated and custom names count,
+  as for the service), not when any `.mmdb` over 1 KB is; it removes
   folders left by an interrupted download, stops one in progress at once on
   `docker stop`, and the health check waits out a first download. The smoke
   scripts keep a failed container for its logs, check `--healthcheck`, and
   report failed requests instead of stopping silently.
+- A blank `GEO_DIR` means the default folder, like the other settings,
+  instead of an empty path with no databases.
 - `geo/README.md` renders as text instead of nine headings, and the README
   no longer suggests logrotate for logs that go to stdout (journald keeps
   them under systemd).

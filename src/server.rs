@@ -8,22 +8,22 @@
 //! slot forever; every edge in front of the judge talks HTTP/1.1 to it.
 use axum::{Router, extract::ConnectInfo};
 use hyper::{body::Incoming, server::conn::http1};
-use hyper_util::{
-    rt::{TokioIo, TokioTimer},
-    server::graceful::GracefulShutdown,
-};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use std::{
     future::Future,
     io,
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpListener,
-    sync::Semaphore,
+    sync::{Semaphore, watch},
     time::Sleep,
 };
 use tower::ServiceExt;
@@ -43,10 +43,12 @@ pub struct Limits {
     /// a client that stops reading its responses (pipelining requests to fill
     /// the socket) would otherwise hold its slot with no timer running.
     pub write_timeout: Duration,
-    /// A connection is closed after this time even if it is busy: the last
-    /// backstop against a client that reads, but only a byte at a time.
+    /// A connection takes no new request after this time, and is dropped
+    /// `shutdown_grace` later if it is still busy: the last backstop against
+    /// a client that reads, but only a byte at a time.
     pub max_connection_age: Duration,
-    /// How long shutdown waits for in-flight requests.
+    /// How long a closing connection, at shutdown or past its age limit, may
+    /// take to finish the request in flight.
     pub shutdown_grace: Duration,
 }
 
@@ -62,7 +64,9 @@ pub async fn serve(
         .header_read_timeout(limits.header_read_timeout)
         .max_buf_size(MAX_BUF_SIZE);
     let connections = Arc::new(Semaphore::new(limits.max_connections));
-    let graceful = GracefulShutdown::new();
+    // Turns true at shutdown: every connection then finishes its request.
+    let (closing, _) = watch::channel(false);
+    let cut = Arc::new(AtomicUsize::new(0));
     tokio::pin!(shutdown);
 
     loop {
@@ -89,24 +93,51 @@ pub async fn serve(
             app.clone().oneshot(req)
         });
         let io = TokioIo::new(WriteTimeout::new(stream, limits.write_timeout));
-        let conn = graceful.watch(builder.serve_connection(io, service));
-        let max_age = limits.max_connection_age;
+        let conn = builder.serve_connection(io, service);
+        let mut closing = closing.subscribe();
+        let cut = cut.clone();
+        let (max_age, grace) = (limits.max_connection_age, limits.shutdown_grace);
         tokio::spawn(async move {
-            match tokio::time::timeout(max_age, conn).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::debug!(%peer, "connection closed with error: {e}"),
-                Err(_) => tracing::debug!(%peer, "connection closed at its age limit"),
+            let _permit = permit;
+            tokio::pin!(conn);
+            let done = tokio::select! {
+                done = conn.as_mut() => Some(done),
+                () = tokio::time::sleep(max_age) => None,
+                _ = closing.wait_for(|closing| *closing) => None,
+            };
+            // At the age limit and at shutdown the request in flight is
+            // answered and no further one is taken: dropping the connection
+            // outright would fail a request a reverse proxy had just sent
+            // over it. One that is still busy after the grace is dropped.
+            let done = match done {
+                Some(done) => Some(done),
+                None => {
+                    conn.as_mut().graceful_shutdown();
+                    tokio::time::timeout(grace, conn.as_mut()).await.ok()
+                }
+            };
+            match done {
+                Some(Ok(())) => {}
+                Some(Err(e)) => tracing::debug!(%peer, "connection closed with error: {e}"),
+                None => {
+                    cut.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(%peer, "connection dropped while still busy");
+                }
             }
-            drop(permit);
         });
     }
 
     drop(listener);
-    if tokio::time::timeout(limits.shutdown_grace, graceful.shutdown())
-        .await
-        .is_err()
-    {
-        tracing::warn!("graceful shutdown timed out; dropping remaining connections");
+    cut.store(0, Ordering::Relaxed);
+    closing.send_replace(true);
+    // Every connection holds a permit until it ends, which takes the grace
+    // at most; the outer limit only guards against a task that never does.
+    let all = u32::try_from(limits.max_connections).unwrap_or(u32::MAX);
+    let drained =
+        tokio::time::timeout(limits.shutdown_grace * 2, connections.acquire_many(all)).await;
+    let cut = cut.load(Ordering::Relaxed);
+    if drained.is_err() || cut > 0 {
+        tracing::warn!("graceful shutdown timed out; dropped {cut} busy connections");
     }
 }
 
@@ -233,6 +264,13 @@ mod tests {
                     "/peer",
                     get(|ConnectInfo(peer): ConnectInfo<SocketAddr>| async move {
                         peer.ip().to_string()
+                    }),
+                )
+                .route(
+                    "/slow",
+                    get(|| async {
+                        tokio::time::sleep(Duration::from_millis(600)).await;
+                        "done"
                     }),
                 )
                 // Larger than the socket buffers on both ends, so a client that
@@ -389,6 +427,48 @@ Host: x
             "served while the slot was taken"
         );
         stop.send(()).unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_request_in_flight_at_the_age_limit_is_answered() {
+        let (addr, stop, handle) = start_with(Limits {
+            header_read_timeout: Duration::from_secs(30),
+            max_connections: 4,
+            write_timeout: Duration::from_secs(30),
+            max_connection_age: Duration::from_millis(200),
+            shutdown_grace: Duration::from_secs(5),
+        })
+        .await;
+        // A keep-alive request that outlives the connection's age limit.
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = String::new();
+        // The answer comes whole, then the connection closes by itself.
+        tokio::time::timeout(Duration::from_secs(5), s.read_to_string(&mut resp))
+            .await
+            .expect("the connection was not closed after the answer")
+            .unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp:?}");
+        assert!(resp.ends_with("done"), "{resp:?}");
+        stop.send(()).unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_answers_the_request_in_flight() {
+        let (addr, stop, handle) = start(Duration::from_secs(5)).await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.send(()).unwrap();
+        let mut resp = String::new();
+        s.read_to_string(&mut resp).await.unwrap();
+        assert!(resp.ends_with("done"), "{resp:?}");
         handle.await.unwrap();
     }
 }

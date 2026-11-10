@@ -68,7 +68,8 @@ if [ -x "$BIN" ]; then
   for db in dbip-city-lite dbip-asn-lite; do
     echo "== validating $db"
     mkdir -p "$TMP/check-$db"
-    ln -f "$TMP/$db.mmdb" "$TMP/check-$db/$db.mmdb" 2>/dev/null       || cp "$TMP/$db.mmdb" "$TMP/check-$db/$db.mmdb"
+    ln -f "$TMP/$db.mmdb" "$TMP/check-$db/$db.mmdb" 2>/dev/null \
+      || cp "$TMP/$db.mmdb" "$TMP/check-$db/$db.mmdb"
     if ! GEO_DIR="$TMP/check-$db" "$BIN" --check-geo; then
       echo "error: downloaded $db.mmdb failed validation" >&2
       exit 1
