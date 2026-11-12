@@ -25,7 +25,8 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONNECTIONS: usize = 4096;
 /// A response write that makes no progress for this long closes the connection.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
-/// One connection, busy or not, is closed after this time.
+/// A connection takes no new request after this time; one still busy is
+/// dropped when the shutdown grace has passed as well.
 const MAX_CONNECTION_AGE: Duration = Duration::from_secs(300);
 
 fn healthcheck(addr: SocketAddr) -> bool {

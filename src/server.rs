@@ -273,6 +273,13 @@ mod tests {
                         "done"
                     }),
                 )
+                .route(
+                    "/hang",
+                    get(|| async {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        "never"
+                    }),
+                )
                 // Larger than the socket buffers on both ends, so a client that
                 // does not read makes the server's write stall.
                 .route("/big", get(|| async { vec![b'x'; 64 << 20] }));
@@ -455,6 +462,60 @@ Host: x
         assert!(resp.ends_with("done"), "{resp:?}");
         stop.send(()).unwrap();
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_connection_still_busy_after_the_grace_is_dropped() {
+        let (addr, stop, handle) = start_with(Limits {
+            header_read_timeout: Duration::from_secs(30),
+            max_connections: 1,
+            write_timeout: Duration::from_secs(30),
+            max_connection_age: Duration::from_millis(100),
+            shutdown_grace: Duration::from_millis(200),
+        })
+        .await;
+        // The only slot is held by a request that never finishes.
+        let mut first = TcpStream::connect(addr).await.unwrap();
+        first
+            .write_all(b"GET /hang HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = String::new();
+        tokio::time::timeout(Duration::from_secs(5), first.read_to_string(&mut resp))
+            .await
+            .expect("the busy connection was never dropped")
+            .ok();
+        assert_eq!(resp, "", "dropped without an answer");
+        // Its slot is free again.
+        let mut second = TcpStream::connect(addr).await.unwrap();
+        second
+            .write_all(b"GET /peer HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = String::new();
+        tokio::time::timeout(Duration::from_secs(5), second.read_to_string(&mut resp))
+            .await
+            .expect("second client never served")
+            .unwrap();
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        stop.send(()).unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_does_not_wait_for_a_request_that_never_ends() {
+        let (addr, stop, handle) = start(Duration::from_secs(5)).await;
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /hang HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.send(()).unwrap();
+        // The grace is one second: the server is gone soon after it.
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("shutdown waited for the hanging request")
+            .unwrap();
     }
 
     #[tokio::test]

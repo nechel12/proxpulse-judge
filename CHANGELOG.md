@@ -33,6 +33,10 @@
 
 ### Changed
 
+- Geo records are read in MaxMind's shape only, which DB-IP Lite follows key
+  for key. The flat spellings (`country_code`, `lat`, `lon`, `asn`, `org`
+  and the like) that neither database has are no longer read: a custom
+  database that used them now loads with empty geo fields.
 - The README is half as long. The deployment variants, the prebuilt image,
   database updates and logs moved to `docs/deploy.md`, signed answers to
   `docs/signing.md`, each with a Russian version; the README keeps the

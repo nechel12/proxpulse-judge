@@ -1,6 +1,5 @@
 //! Local .mmdb pool: GeoLite2 / DB-IP Lite, read fully into RAM.
-//! Records are decoded flexibly (multiple key spellings) so both
-//! MaxMind and DB-IP files work.
+//! Records are read in MaxMind's shape, which DB-IP Lite follows.
 use maxminddb::Reader;
 use serde::Serialize;
 use serde_json::Value;

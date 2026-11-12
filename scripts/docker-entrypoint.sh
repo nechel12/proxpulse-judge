@@ -12,14 +12,14 @@ BIN="${JUDGE_BIN:-/app/proxpulse-judge}"
 
 mkdir -p "$GEO_DIR" 2>/dev/null || true
 
-# A database the service would load: a .mmdb named for a city, country or
-# ASN database (dated and custom names included, as in src/geo.rs), of a real
-# size. Any leftover or broken *.mmdb would otherwise suppress the fallback
+# A database the service would load: a .mmdb (in lowercase, as the service
+# requires) named for a city, country or ASN database in any case (dated and
+# custom names included, as in src/geo.rs), of a real size. Any leftover or broken *.mmdb would otherwise suppress the fallback
 # forever, and a fallback downloaded next to a custom-named database would
 # take precedence over it.
 has_mmdb() {
-  [ -n "$(find "$GEO_DIR" -maxdepth 1 -type f -size +1M \
-    \( -iname '*city*.mmdb' -o -iname '*country*.mmdb' -o -iname '*asn*.mmdb' \) \
+  [ -n "$(find "$GEO_DIR" -maxdepth 1 -type f -size +1M -name '*.mmdb' \
+    \( -iname '*city*' -o -iname '*country*' -o -iname '*asn*' \) \
     -print -quit 2>/dev/null)" ]
 }
 
