@@ -364,7 +364,8 @@ fn is_telltale(name: &str, trust_proxy: bool, trust_cf: bool) -> bool {
 
 /// levels: elite | anonymous | transparent.
 ///
-/// `headers` — request headers as seen by judge, with the
+/// `headers` — request headers as seen by judge, names in lowercase (as
+/// `HeaderMap` gives them), with the
 /// reverse-proxy-added XFF entries already removed and `X-Forwarded-For`
 /// dropped when none are left (see [`pre_edge_xff`]). Any `X-Forwarded-For`
 /// left, even an empty one, came from the proxy side. `direct_ip` —
@@ -376,19 +377,22 @@ pub fn anonymity_level(
     trust_proxy: bool,
     trust_cf: bool,
 ) -> &'static str {
-    let lower = |k: &String| k.to_ascii_lowercase();
-    if let Some(d) = direct_ip
-        .and_then(normalize_host)
-        .and_then(|d| d.parse::<std::net::IpAddr>().ok())
+    debug_assert!(
+        headers
+            .keys()
+            .all(|k| !k.bytes().any(|b| b.is_ascii_uppercase())),
+        "header names are lowercase"
+    );
+    if let Some(d) = direct_ip.and_then(parse_host)
         && headers.iter().any(|(k, v)| {
-            scanned_for_leaks(&lower(k), v, headers, trust_proxy, trust_cf) && ip_in_text(v, &d)
+            scanned_for_leaks(k, v, headers, trust_proxy, trust_cf) && ip_in_text(v, &d)
         })
     {
         return "transparent";
     }
     if headers
         .keys()
-        .any(|k| is_telltale(&lower(k), trust_proxy, trust_cf))
+        .any(|k| is_telltale(k, trust_proxy, trust_cf))
     {
         return "anonymous";
     }

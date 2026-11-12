@@ -158,23 +158,22 @@ impl GeoPool {
         &self.sources
     }
 
-    /// Required attribution notices for the loaded databases (inspects both
-    /// filenames and MMDB `database_type` metadata).
+    /// Required attribution notices for the loaded databases. Each database's
+    /// own `database_type` says whose it is; its file name is asked only when
+    /// the type names no vendor.
     pub fn attributions(&self) -> Vec<&'static str> {
         let mut out = Vec::new();
-        let mut labels: Vec<String> = self
-            .sources
-            .values()
-            .map(|s| s.to_ascii_lowercase())
-            .collect();
-        for reader in [&self.city, &self.country, &self.asn].into_iter().flatten() {
-            labels.push(reader.metadata().database_type.to_ascii_lowercase());
-        }
-        for name in labels {
-            if name.contains("maxmind") || name.contains("geolite") || name.contains("geoip") {
-                out.push(MAXMIND_ATTRIBUTION);
-            } else if name.contains("dbip") || name.contains("db-ip") {
-                out.push(DBIP_ATTRIBUTION);
+        for (kind, reader) in [
+            ("city", &self.city),
+            ("country", &self.country),
+            ("asn", &self.asn),
+        ] {
+            let Some(reader) = reader else { continue };
+            let file = self.sources.get(kind).map(String::as_str).unwrap_or("");
+            if let Some(notice) =
+                vendor_notice(&reader.metadata().database_type).or_else(|| vendor_notice(file))
+            {
+                out.push(notice);
             }
         }
         out.sort_unstable();
@@ -262,6 +261,23 @@ impl GeoPool {
     }
 }
 
+/// The notice of the vendor a database type or file name mentions. DB-IP is
+/// asked first: the type of its ASN database is
+/// `DBIP-ASN-Lite (compat=GeoLite2-ASN)`, which names MaxMind's too.
+fn vendor_notice(label: &str) -> Option<&'static str> {
+    let label = label.to_ascii_lowercase();
+    if label.contains("dbip") || label.contains("db-ip") {
+        Some(DBIP_ATTRIBUTION)
+    } else if ["maxmind", "geolite", "geoip"]
+        .iter()
+        .any(|v| label.contains(v))
+    {
+        Some(MAXMIND_ATTRIBUTION)
+    } else {
+        None
+    }
+}
+
 fn lookup_value(
     reader: &Reader<Vec<u8>>,
     addr: IpAddr,
@@ -314,6 +330,9 @@ fn get_u32(v: &Value, paths: &[&[&str]]) -> Option<u32> {
         .find_map(|path| u32::try_from(at(v, path)?.as_u64()?).ok())
 }
 
+// The record shape is MaxMind's, which DB-IP Lite follows key for key
+// (checked against its City and ASN files); no other shape is read.
+
 fn apply_city(v: &Value, out: &mut GeoInfo) {
     if out.country.is_none() {
         out.country = get_str(
@@ -321,7 +340,6 @@ fn apply_city(v: &Value, out: &mut GeoInfo) {
             &[
                 &["country", "names", "en"],
                 &["registered_country", "names", "en"],
-                &["country"],
             ],
         );
     }
@@ -331,27 +349,17 @@ fn apply_city(v: &Value, out: &mut GeoInfo) {
             &[
                 &["country", "iso_code"],
                 &["registered_country", "iso_code"],
-                &["country_code"],
-                &["countryCode"],
             ],
         );
     }
     if out.city.is_none() {
-        out.city = get_str(v, &[&["city", "names", "en"], &["city"]]);
+        out.city = get_str(v, &[&["city", "names", "en"]]);
     }
     if out.latitude.is_none() {
-        out.latitude = get_f64(v, &[&["location", "latitude"], &["latitude"], &["lat"]]);
+        out.latitude = get_f64(v, &[&["location", "latitude"]]);
     }
     if out.longitude.is_none() {
-        out.longitude = get_f64(
-            v,
-            &[
-                &["location", "longitude"],
-                &["longitude"],
-                &["lon"],
-                &["lng"],
-            ],
-        );
+        out.longitude = get_f64(v, &[&["location", "longitude"]]);
     }
     // Some combined databases carry the ASN fields as well.
     apply_asn(v, out);
@@ -359,18 +367,10 @@ fn apply_city(v: &Value, out: &mut GeoInfo) {
 
 fn apply_asn(v: &Value, out: &mut GeoInfo) {
     if out.asn.is_none() {
-        out.asn = get_u32(v, &[&["autonomous_system_number"], &["asn"]]);
+        out.asn = get_u32(v, &[&["autonomous_system_number"]]);
     }
     if out.aso.is_none() {
-        out.aso = get_str(
-            v,
-            &[
-                &["autonomous_system_organization"],
-                &["aso"],
-                &["organization"],
-                &["org"],
-            ],
-        );
+        out.aso = get_str(v, &[&["autonomous_system_organization"]]);
     }
 }
 
@@ -658,7 +658,14 @@ mod tests {
             "DBIP-City-Lite",
             &json!({"country": {"iso_code": "DE"}}),
         );
+        // The type DB-IP really gives its ASN database names GeoLite2 too.
+        test_mmdb::write(
+            &dir.path().join("dbip-asn-lite.mmdb"),
+            "DBIP-ASN-Lite (compat=GeoLite2-ASN)",
+            &json!({"autonomous_system_number": 64500}),
+        );
         let pool = GeoPool::open(dir.path());
+        assert_eq!(pool.sources().len(), 2);
         assert_eq!(pool.attributions(), vec![DBIP_ATTRIBUTION]);
         assert_eq!(
             pool.lookup(ip("203.0.113.7")).country_code.as_deref(),
@@ -667,29 +674,51 @@ mod tests {
     }
 
     #[test]
-    fn flat_shaped_record() {
-        let v = json!({
-            "city": "Paris", "country": "France", "country_code": "FR",
-            "latitude": 48.8, "longitude": 2.3,
-        });
-        let mut out = GeoInfo::default();
-        apply_city(&v, &mut out);
-        assert_eq!(out.city.as_deref(), Some("Paris"));
-        assert_eq!(out.country_code.as_deref(), Some("FR"));
+    fn the_database_type_decides_the_attribution_over_the_file_name() {
+        // A DB-IP file kept under the name a deployment already mounts.
+        let dir = TempDir::new("geo-renamed");
+        test_mmdb::write(
+            &dir.path().join("GeoLite2-City.mmdb"),
+            "DBIP-City-Lite",
+            &json!({"country": {"iso_code": "DE"}}),
+        );
+        assert_eq!(
+            GeoPool::open(dir.path()).attributions(),
+            vec![DBIP_ATTRIBUTION]
+        );
     }
 
     #[test]
-    fn asn_record_variants() {
+    fn a_country_without_its_name_falls_back_to_the_registered_one() {
+        // The shape of a real DB-IP City record, with the country's name
+        // missing: the registered country still names it.
+        let v = json!({
+            "city": {"names": {"en": "Falkenstein"}},
+            "country": {"iso_code": "DE"},
+            "registered_country": {"iso_code": "DE", "names": {"en": "Germany"}},
+            "location": {"latitude": 50.4754, "longitude": 12},
+        });
+        let mut out = GeoInfo::default();
+        apply_city(&v, &mut out);
+        assert_eq!(out.country.as_deref(), Some("Germany"));
+        assert_eq!(out.country_code.as_deref(), Some("DE"));
+        assert_eq!(out.city.as_deref(), Some("Falkenstein"));
+        // An integer coordinate is a number like any other.
+        assert_eq!((out.latitude, out.longitude), (Some(50.4754), Some(12.0)));
+    }
+
+    #[test]
+    fn asn_record() {
         let v =
             json!({"autonomous_system_number": 9009, "autonomous_system_organization": "M-net"});
         let mut out = GeoInfo::default();
         apply_asn(&v, &mut out);
         assert_eq!(out.asn, Some(9009));
         assert_eq!(out.aso.as_deref(), Some("M-net"));
-        let v2 = json!({"asn": 123, "org": "Example"});
-        let mut out2 = GeoInfo::default();
-        apply_asn(&v2, &mut out2);
-        assert_eq!(out2.asn, Some(123));
+        // A number that is no ASN is not taken.
+        let mut out = GeoInfo::default();
+        apply_asn(&json!({"autonomous_system_number": -1}), &mut out);
+        assert_eq!(out.asn, None);
     }
 
     #[test]

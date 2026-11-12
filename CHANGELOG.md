@@ -45,6 +45,9 @@
 
 ### Fixed
 
+- With DB-IP databases the `attribution` field listed MaxMind as well: the
+  type of DB-IP's ASN database names GeoLite2 for compatibility. Each
+  database's own type now decides whose notice is shown.
 - `Client-IP`, `X-Client-IP`, `X-Originating-IP`, `X-Cluster-Client-IP`,
   `Forwarded-For`, `Forwarded-For-IP`, `X-Forwarded`, `X-Remote-IP`,
   `X-Remote-Addr`, `Coming-From`, `X-Coming-From`, and `Xroxy-Connection` now
