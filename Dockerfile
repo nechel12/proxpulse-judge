@@ -16,7 +16,7 @@
 # the environment defines the topology (.env, render.yaml). An image with TRUST_CF=1
 # run directly would let anyone spoof the IP with a CF-Connecting-IP header.
 
-FROM rust:1.99-trixie@sha256:09027f873d45b8ecd1dc86f1fa13b7a62b875c961f017a0e331267b350430137 AS build
+FROM rust:1.99-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 # prefetch dependencies for layer caching
