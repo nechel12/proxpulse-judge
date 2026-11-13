@@ -9,7 +9,9 @@
 # (see also GET / — the service serves the licenses itself).
 # MaxMind GeoLite2 must NOT be baked into the image (the EULA forbids public
 # redistribution) — for MaxMind use the runtime target + a volume.
-# Base images are pinned by digest; Dependabot updates them.
+# Base images are pinned by digest; Dependabot updates them. Debian's security
+# fixes are applied at build time (apt-get upgrade in base), so a fixed package
+# does not wait for the next base image.
 # TRUST_PROXY/TRUST_CF are deliberately unset: the image keeps the safe default 0,
 # the environment defines the topology (.env, render.yaml). An image with TRUST_CF=1
 # run directly would let anyone spoof the IP with a CF-Connecting-IP header.
@@ -24,7 +26,8 @@ COPY src ./src
 RUN cargo build --release --locked
 
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2 AS base
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
         bash ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --no-create-home --uid 10001 judge \

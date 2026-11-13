@@ -19,6 +19,9 @@
   or the Render redeploy. Forks still build their own `main`.
 - The `METRICS_TOKEN` comparison no longer tells the token's length: both
   sides are hashed before the constant-time comparison.
+- Image builds apply Debian's security updates, so a fixed package (such as
+  the zlib fix for CVE-2026-76844 and CVE-2026-85091) no longer waits for a
+  new `debian:trixie-slim` base image.
 
 ### Added
 
